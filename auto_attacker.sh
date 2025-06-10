@@ -1,8 +1,25 @@
 #!/bin/bash
 
+print_progress() {
+  local progress=$(( 100 * current / total ))
+  local done=$(( progress / 2 ))
+  local left=$(( 50 - done ))
+  fill=$(printf "%${done}s" | tr ' ' '=')
+  empty=$(printf "%${left}s" | tr ' ' ' ')
+  printf "\rProgress: [${fill}${empty}] %d%% (%d/%d)" "$progress" "$current" "$total"
+}
+
+
 # === CONFIG ===
-ATTACK_LIST=("cp_dl_long_10mb_DR_1000.pcap")
+
 INJECTION_POINTS=("DU" "RU")
+# ATTACK_LIST=("cp_dl_long_10mb_DR_1000.pcap")
+ATTACK_LIST=($(ls Traffic/custom/*.pcap | xargs -n1 basename))
+echo "Total attacks to run: ${#ATTACK_LIST[@]} files × ${#INJECTION_POINTS[@]} points"
+
+total=$(( ${#ATTACK_LIST[@]} * ${#INJECTION_POINTS[@]} ))
+current=0
+
 CRASH_LOG="crash_logs.txt"
 RESULTS_DIR="$PWD/attack_results"
 
@@ -27,6 +44,8 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
     ATTACK_DIR="$RESULTS_DIR/${ATTACK_NAME}_INJ_${INJ}"
     mkdir -p "$ATTACK_DIR"
 
+    echo ""
+    echo ""
     echo "=== Starting attack: $ATTACK_FILE | Injection Point: $INJ ==="
 
 # ==============================gNB=========================================
@@ -73,11 +92,11 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
     attacker_pid=$!
     echo "[DEBUG] Attacker PID: $attacker_pid"
 
-    echo "[DEBUG] Attacking for 15 seconds"
+    echo "[DEBUG] Attacking for 10 seconds"
 
-    # === Monitor for 15 seconds ===
+    # === Monitor for 10 seconds ===
     crashed=0
-    for ((i=0; i<15; i++)); do
+    for ((i=0; i<10; i++)); do
       sleep 1
       if ! kill -0 $ru_pid 2>/dev/null; then
         echo "[CRASH] ru_emulator crashed during $ATTACK_FILE injection $INJ" | tee -a "$CRASH_LOG"
@@ -117,9 +136,15 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
 
     echo "✅ Completed $ATTACK_FILE | Injection $INJ"
     echo "----------------------------------------"
+
+
+    ((current++))
+    print_progress
+
   done
 done
 
+echo ""
 echo "[DEBUG] Cleaning up any stray processes..."
 sudo pkill -f ru_emulator
 sudo pkill -f gnb
