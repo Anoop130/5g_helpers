@@ -1,0 +1,26 @@
+#!/usr/bin/expect -f
+
+set timeout 30
+set gnb_cmd [lrange $argv 0 end]
+
+log_user 1
+
+# Start gNB
+spawn sudo {*}$gnb_cmd
+
+# Step 1: Wait briefly then press Enter
+sleep 1
+send "\r"
+
+# Step 2: Wait briefly then press 't'
+sleep 1
+send "t"
+
+# Step 3: Press Enter again
+sleep 1
+send "\r"
+
+# Step 4: Let it run in background
+expect {
+    eof
+}

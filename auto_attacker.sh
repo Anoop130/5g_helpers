@@ -29,14 +29,21 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
 
     echo "=== Starting attack: $ATTACK_FILE | Injection Point: $INJ ==="
 
-    # Launch gNB
-    echo "[DEBUG] Launching gNB..."
+# ==============================gNB=========================================
+
+    echo "[DEBUG] Launching gNB via expect..."
     cd "$GNB_DIR"
-    sudo $GNB_CMD > "$ATTACK_DIR/gnb_${ATTACK_NAME}.log" 2>&1 &
+    gnb_log="$ATTACK_DIR/gnb_${ATTACK_NAME}.log"
+
+    "$ATTACKER_DIR/start_gnb.expect" $GNB_CMD > "$gnb_log" 2>&1 &
     gnb_pid=$!
     echo "[DEBUG] gNB PID: $gnb_pid"
-    echo "[DEBUG] waiting for gNB to be up"
-    sleep 5
+
+    echo "[DEBUG] Waiting 10s for gNB to stabilize..."
+    sleep 10
+
+
+# ======================== ru ========================================
 
     # Launch RU
     echo "[DEBUG] Launching ru_emulator..."
@@ -56,6 +63,8 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
       INTF="$INTERFACE_RU"
     fi
 
+# ======================= attacker ========================================
+
     # Launch attacker
     echo "[DEBUG] Launching attacker on $INTF..."
     echo "[DEBUG] Start time: [$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -72,15 +81,11 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
       sleep 1
       if ! kill -0 $ru_pid 2>/dev/null; then
         echo "[CRASH] ru_emulator crashed during $ATTACK_FILE injection $INJ" | tee -a "$CRASH_LOG"
-        echo "[DEBUG] Stopped at: [$(date '+%Y-%m-%d %H:%M:%S')]"
-
         crashed=1
         break
       fi
       if ! kill -0 $gnb_pid 2>/dev/null; then
         echo "[CRASH] gNB crashed during $ATTACK_FILE injection $INJ" | tee -a "$CRASH_LOG"
-        echo "[DEBUG] Stopped at: [$(date '+%Y-%m-%d %H:%M:%S')]"
-
         crashed=1
         break
       fi
@@ -88,8 +93,6 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
 
     # Stop attacker after 15s
     echo "[DEBUG] Stopping attacker..."
-    echo "[DEBUG] Stopping time: [$(date '+%Y-%m-%d %H:%M:%S')]"
-
     sudo kill $attacker_pid 2>/dev/null
 
     # If crashed, stop everything immediately
@@ -122,4 +125,4 @@ sudo pkill -f ru_emulator
 sudo pkill -f gnb
 sudo pkill -f tcpreplay
 
-echo "🎯 All attacks completed. See logs in: $RESULTS_DIR"
+echo "All attacks completed. See logs in: $RESULTS_DIR"
