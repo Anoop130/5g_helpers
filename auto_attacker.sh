@@ -35,6 +35,8 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
     sudo $GNB_CMD > "$ATTACK_DIR/gnb_${ATTACK_NAME}.log" 2>&1 &
     gnb_pid=$!
     echo "[DEBUG] gNB PID: $gnb_pid"
+    echo "[DEBUG] waiting for gNB to be up"
+    sleep 5
 
     # Launch RU
     echo "[DEBUG] Launching ru_emulator..."
@@ -56,8 +58,9 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
 
     # Launch attacker
     echo "[DEBUG] Launching attacker on $INTF..."
+    echo "[DEBUG] Start time: [$(date '+%Y-%m-%d %H:%M:%S')]"
     cd "$ATTACKER_DIR"
-    sudo tcpreplay --intf1=$INTF --loop=0 --topspeed "Traffic/custom/$ATTACK_FILE" > "$ATTACK_DIR/attacker_${ATTACK_NAME}_${INJ}.log" 2>&1 &
+    sudo tcpreplay --intf1=$INTF --loop=0 --topspeed "Traffic/custom/$ATTACK_FILE" &
     attacker_pid=$!
     echo "[DEBUG] Attacker PID: $attacker_pid"
 
@@ -69,11 +72,15 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
       sleep 1
       if ! kill -0 $ru_pid 2>/dev/null; then
         echo "[CRASH] ru_emulator crashed during $ATTACK_FILE injection $INJ" | tee -a "$CRASH_LOG"
+        echo "[DEBUG] Stopped at: [$(date '+%Y-%m-%d %H:%M:%S')]"
+
         crashed=1
         break
       fi
       if ! kill -0 $gnb_pid 2>/dev/null; then
         echo "[CRASH] gNB crashed during $ATTACK_FILE injection $INJ" | tee -a "$CRASH_LOG"
+        echo "[DEBUG] Stopped at: [$(date '+%Y-%m-%d %H:%M:%S')]"
+
         crashed=1
         break
       fi
@@ -81,6 +88,8 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
 
     # Stop attacker after 15s
     echo "[DEBUG] Stopping attacker..."
+    echo "[DEBUG] Stopping time: [$(date '+%Y-%m-%d %H:%M:%S')]"
+
     sudo kill $attacker_pid 2>/dev/null
 
     # If crashed, stop everything immediately
