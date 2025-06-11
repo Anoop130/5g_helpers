@@ -1,12 +1,24 @@
 import re
 import csv
+import os
+import glob
 
 def clean_ansi_escape(line):
     """Remove ANSI escape sequences like \x1b[0m."""
     return re.sub(r'\x1b\[[0-9;]*m', '', line)
 
+def get_csv_output_path(log_path, subfolder):
+    """Generate output CSV path in specified subfolder."""
+    base = os.path.basename(log_path)
+    csv_name = base.replace(".log", ".csv") if base.endswith(".log") else base + ".csv"
+    folder = os.path.join(os.getcwd(), subfolder)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, csv_name)
+
 # === RU Log Parser ===
-def parse_ru_log_with_repeated_headers(log_file_path, output_csv_path):
+def parse_ru(log_file_path):
+    output_csv_path = get_csv_output_path(log_file_path, subfolder="ru_csv")
+
     with open(log_file_path, 'r') as f:
         lines = f.readlines()
 
@@ -19,18 +31,14 @@ def parse_ru_log_with_repeated_headers(log_file_path, output_csv_path):
     for line in clean_lines:
         if not line.startswith("|"):
             continue
-
         if "TIME" in line and "TX_TOTAL" in line:
-            # This is a header line (might be the first or a repeated one)
             current_header = [h.strip() for h in line.strip("|").split("|")]
             if not headers:
                 headers = current_header
                 header_line_pattern = line.strip("|")
             continue
-
         if line.strip("|") == header_line_pattern:
             continue
-
         values = [v.strip() for v in line.strip("|").split("|")]
         if len(values) == len(headers):
             data_rows.append(values)
@@ -40,15 +48,12 @@ def parse_ru_log_with_repeated_headers(log_file_path, output_csv_path):
         writer.writerow(headers)
         writer.writerows(data_rows)
 
-    print(f"[RU] Clean CSV saved to: {output_csv_path}")
-
+    # print(f"[RU] Saved: {output_csv_path}")
 
 # === gNB Log Parser ===
-def parse_gnb_log(log_file_path, output_csv_path):
-    """
-    Parses gNB log with repeated DL/UL tables.
-    Extracts headers + values into unified CSV.
-    """
+def parse_gnb(log_file_path):
+    output_csv_path = get_csv_output_path(log_file_path, subfolder="gnb_csv")
+
     with open(log_file_path, "r") as f:
         lines = [line.strip() for line in f if line.strip()]
 
@@ -58,19 +63,14 @@ def parse_gnb_log(log_file_path, output_csv_path):
 
     while i < len(lines):
         line = lines[i]
-
         if line.startswith("|--------------------DL"):
-            # Found a new table block
             if i + 1 < len(lines):
                 header_line = lines[i + 1]
                 headers = [h.strip() for h in header_line.replace('|', ' ').split()]
-                i += 2  # move to first data line
+                i += 2
                 continue
-
         if headers and "|" in line and not line.startswith("|--") and not any(k in line for k in ["DL", "UL"]):
-            # Parse a data line
             values = [v.strip() for v in line.split("|")]
-            # Flatten any remaining splits
             row = []
             for v in values:
                 row.extend(v.split())
@@ -78,23 +78,38 @@ def parse_gnb_log(log_file_path, output_csv_path):
                 data_rows.append(row)
         i += 1
 
-    # Save to CSV
     with open(output_csv_path, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(headers)
         writer.writerows(data_rows)
 
-    print(f"[gNB] Table CSV saved to: {output_csv_path}")
+    # print(f"[gNB] Saved: {output_csv_path}")
 
+# === Batch Parser ===
+def parse_batch(base_folder="attack_results"):
+    subfolders = [f.path for f in os.scandir(base_folder) if f.is_dir()]
 
-# === Example Usage ===
-parse_ru_log_with_repeated_headers(
-    log_file_path="attack_results/cp_dl_long_1mb_DR_10_INJ_DU/ru_cp_dl_long_1mb_DR_10_DU.log",
-    output_csv_path="ru_log_clean.csv"
-)
+    n = 1
+    for folder in subfolders:
+        ru_logs = glob.glob(os.path.join(folder, "ru_*.log"))
+        gnb_logs = glob.glob(os.path.join(folder, "gnb_*.log"))
 
-parse_gnb_log(
-    log_file_path="attack_results/cp_dl_long_1mb_DR_10_INJ_DU/gnb_cp_dl_long_1mb_DR_10.log",
-    output_csv_path="gnb_log_clean.csv"
-)
+        if ru_logs:
+            # print(f"\n[>>] Parsing RU log: {ru_logs[0]}")
+            parse_ru(ru_logs[0])
+        else:
+            print(f"[--]****No RU log found in**** {folder}")
 
+        if gnb_logs:
+            # print(f"[>>] Parsing gNB log: {gnb_logs[0]}")
+            parse_gnb(gnb_logs[0])
+        else:
+            print(f"[--]****No gNB log found in**** {folder}\n")
+
+        n +=1 
+
+# === Run Batch ===
+if __name__ == "__main__":
+    parse_batch("attack_results")
+    print("ru_emulator logs saved in ru_csv")
+    print("gNB logs saved in gnb_csv")
