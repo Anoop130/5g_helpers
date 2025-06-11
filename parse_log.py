@@ -2,6 +2,8 @@ import re
 import csv
 import os
 import glob
+import json
+import pandas as pd
 
 def clean_ansi_escape(line):
     """Remove ANSI escape sequences like \x1b[0m."""
@@ -108,8 +110,110 @@ def parse_batch(base_folder="attack_results"):
 
         n +=1 
 
+# ============ gets avg of before, during and after logs =============
+def get_avg_ru():
+    columns_of_interest = [
+        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
+        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
+        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
+        "RX_CORRUPT", "RX_ERR_DROP", "TX_TOTAL"
+    ]
+
+    ru_csv_dir = "ru_csv"
+    results = []
+
+    for filename in os.listdir(ru_csv_dir):
+        if filename.endswith(".csv"):
+            file_path = os.path.join(ru_csv_dir, filename)
+            try:
+                df = pd.read_csv(file_path)
+                df[columns_of_interest] = df[columns_of_interest].apply(pd.to_numeric, errors='coerce')
+
+                first_5 = df.iloc[:5][columns_of_interest].mean()
+                next_10 = df.iloc[5:15][columns_of_interest].mean()
+
+                if len(df) > 15:
+                    final_rows = df.iloc[15:20]
+                else:
+                    final_rows = pd.DataFrame(columns=columns_of_interest)
+
+                final_avg = final_rows[columns_of_interest].mean()
+                count_final = len(final_rows)
+
+                results.append({
+                    "file": filename,
+                    "before": first_5.to_dict(),
+                    "during": next_10.to_dict(),
+                    "after": final_avg.to_dict(),
+                })
+
+            except Exception as e:
+                print(f"Failed to process {file_path}: {e}")
+
+    with open("ru_summary.json", "w") as f:
+        json.dump(results, f, indent=4)
+
+    print("\n Summary saved to: ru_summary.json")
+
+
+# ========= json to csv =====================
+def to_csv():
+
+    with open("ru_summary.json") as f:
+        data = json.load(f)
+
+    df = pd.json_normalize(data)
+    df.columns = [col.replace('.', '_') for col in df.columns]
+    df.to_csv("ru_summary.csv", index=False)
+    
+    print("CSV saved to ru_summary.csv")
+
+# ========= processing ru files =============
+def process_ru():
+    # Load CSV
+    df = pd.read_csv("ru_summary.csv")
+    
+    # Clean 'file' column: remove 'ru_' prefix and '.csv' suffix
+    df['file'] = df['file'].str.replace(r'^ru_', '', regex=True)
+    df['file'] = df['file'].str.replace(r'\.csv$', '', regex=True)
+
+    # Save cleaned version (optional)
+    df.to_csv("ru_summary.csv", index=False)
+    print("Cleaned CSV saved to ru_summary.csv")
+
+    return df
+
+# ========= print ru results in terminal ===============
+def display_ru():
+    df = pd.read_csv("ru_summary_cleaned.csv")
+
+    ordered_metrics = [
+        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
+        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
+        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
+        "RX_CORRUPT", "RX_ERR_DROP", "TX_TOTAL"
+    ]
+
+    for _, row in df.iterrows():
+        print(f"\n{row['file']}:\n")
+        print(f"{'Metric':<25} | {'Before':>10} | {'During':>10} | {'After':>10}")
+        print("-" * 55)
+        for metric in ordered_metrics:
+            b = row.get(f"before_{metric}", float('nan'))
+            d = row.get(f"during_{metric}", float('nan'))
+            a = row.get(f"after_{metric}", float('nan'))
+            print(f"{metric:<25} | {b:>10.2f} | {d:>10.2f} | {a:>10.2f}")
+
+
+
 # === Run Batch ===
 if __name__ == "__main__":
+
     parse_batch("attack_results")
     print("ru_emulator logs saved in ru_csv")
     print("gNB logs saved in gnb_csv")
+
+    get_avg_ru()
+    to_csv()
+    process_ru()
+    display_ru()
