@@ -170,39 +170,135 @@ def to_csv():
 
 # ========= processing ru files =============
 def process_ru():
+    import pandas as pd
+
     # Load CSV
     df = pd.read_csv("ru_summary.csv")
     
-    # Clean 'file' column: remove 'ru_' prefix and '.csv' suffix
+    # Clean 'file' column
     df['file'] = df['file'].str.replace(r'^ru_', '', regex=True)
     df['file'] = df['file'].str.replace(r'\.csv$', '', regex=True)
 
-    # Save cleaned version (optional)
+    # Save intermediate cleaned version
     df.to_csv("ru_summary.csv", index=False)
     print("Cleaned CSV saved to ru_summary.csv")
 
+    # Check for NaNs
+    nan_summary = df.isna().sum(axis=1)
+    files_with_nans = df.loc[nan_summary > 0, 'file'].tolist()
+
+    if files_with_nans:
+        with open("crash_summary.txt", "w") as f:
+            for filename in files_with_nans:
+                f.write(f"{filename}\n")
+        print(f"\n{len(files_with_nans)} files had NaN values. Names written to crash_summary.txt")
+        df = df[~df['file'].isin(files_with_nans)]
+
+    # === Initial Metrics ===
+    rx_metrics = [
+        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
+        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
+        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
+        "RX_CORRUPT", "RX_ERR_DROP"
+    ]
+
+    # === Check if RX_CORRUPT and RX_ERR_DROP are always 0 ===
+    zero_check_cols = [
+        "before_RX_CORRUPT", "during_RX_CORRUPT", "after_RX_CORRUPT",
+        "before_RX_ERR_DROP", "during_RX_ERR_DROP", "after_RX_ERR_DROP"
+    ]
+
+    # Keep only existing columns from the list
+    existing_zero_cols = [col for col in zero_check_cols if col in df.columns]
+
+    if existing_zero_cols:
+        all_zero = (df[existing_zero_cols] == 0).all(axis=1)
+        non_zero_files = df.loc[~all_zero, 'file'].tolist()
+
+        if not non_zero_files:
+            print("RX_CORRUPT and RX_ERR_DROP are always 0 — removing them from metrics.")
+            rx_metrics = [m for m in rx_metrics if m not in ["RX_CORRUPT", "RX_ERR_DROP"]]
+            df.drop(columns=existing_zero_cols, inplace=True)
+        else:
+            print("Non-zero RX_CORRUPT or RX_ERR_DROP found in the following files:")
+            for file in non_zero_files:
+                print(f" - {file}")
+    else:
+        print("ℹRX_CORRUPT and RX_ERR_DROP columns not found in data. Skipping zero check.")
+
+
+    # === Percent Calculation ===
+    phases = ['before', 'during', 'after']
+    for phase in phases:
+        for metric in rx_metrics:
+            value_col = f"{phase}_{metric}"
+            base_col = "before_RX_TOTAL"
+            pct_col = f"pct_{phase}_{metric}"
+            if value_col in df.columns and base_col in df.columns:
+                df[pct_col] = 100 * df[value_col] / df[base_col]
+
+        tx_col = f"{phase}_TX_TOTAL"
+        pct_tx_col = f"pct_{phase}_TX_TOTAL"
+        if tx_col in df.columns and "before_TX_TOTAL" in df.columns:
+            df[pct_tx_col] = 100 * df[tx_col] / df["before_TX_TOTAL"]
+
+    # === Delta Calculation ===
+    delta_metrics = rx_metrics + ["RX_TOTAL", "TX_TOTAL"]
+    for metric in delta_metrics:
+        pct_before = f"pct_before_{metric}"
+        pct_during = f"pct_during_{metric}"
+        pct_after = f"pct_after_{metric}"
+        delta_during = f"delta_during_{metric}"
+        delta_after = f"delta_after_{metric}"
+
+        if pct_before in df.columns and pct_during in df.columns:
+            df[delta_during] = df[pct_during] - df[pct_before]
+        if pct_before in df.columns and pct_after in df.columns:
+            df[delta_after] = df[pct_after] - df[pct_before]
+
+    # === Save Output ===
+    df.to_csv("ru_summary.csv", index=False)
+    print("Final summary with percentage and delta values saved to ru_summary.csv")
+
     return df
+
+
+
+
+
 
 # ========= print ru results in terminal ===============
 def display_ru():
-    df = pd.read_csv("ru_summary_cleaned.csv")
+    df = pd.read_csv("ru_summary.csv")
 
     ordered_metrics = [
         "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
         "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
         "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
-        "RX_CORRUPT", "RX_ERR_DROP", "TX_TOTAL"
+        "TX_TOTAL"
     ]
 
     for _, row in df.iterrows():
         print(f"\n{row['file']}:\n")
-        print(f"{'Metric':<25} | {'Before':>10} | {'During':>10} | {'After':>10}")
-        print("-" * 55)
+        print(f"{'Metric':<25} | {'Before':>10} | {'%':>7} | {'During':>10} | {'%':>7} | {'After':>10} | {'%':>7} | {'ΔDuring':>9} | {'ΔAfter':>9}")
+        print("-" * 110)
+
         for metric in ordered_metrics:
-            b = row.get(f"before_{metric}", float('nan'))
-            d = row.get(f"during_{metric}", float('nan'))
-            a = row.get(f"after_{metric}", float('nan'))
-            print(f"{metric:<25} | {b:>10.2f} | {d:>10.2f} | {a:>10.2f}")
+            b_val = row.get(f"before_{metric}", float('nan'))
+            d_val = row.get(f"during_{metric}", float('nan'))
+            a_val = row.get(f"after_{metric}", float('nan'))
+
+            b_pct = row.get(f"pct_before_{metric}", float('nan'))
+            d_pct = row.get(f"pct_during_{metric}", float('nan'))
+            a_pct = row.get(f"pct_after_{metric}", float('nan'))
+
+            delta_d = row.get(f"delta_during_{metric}", float('nan'))
+            delta_a = row.get(f"delta_after_{metric}", float('nan'))
+
+            print(f"{metric:<25} | {b_val:>10.2f} | {b_pct:>6.2f}% | "
+                  f"{d_val:>10.2f} | {d_pct:>6.2f}% | {a_val:>10.2f} | {a_pct:>6.2f}% | "
+                  f"{delta_d:>8.2f}% | {delta_a:>8.2f}%")
+
 
 
 
@@ -213,7 +309,7 @@ if __name__ == "__main__":
     print("ru_emulator logs saved in ru_csv")
     print("gNB logs saved in gnb_csv")
 
-    get_avg_ru()
-    to_csv()
+    # get_avg_ru()
+    # to_csv()
     process_ru()
     display_ru()
