@@ -153,7 +153,7 @@ def get_avg_ru():
     with open("ru_summary.json", "w") as f:
         json.dump(results, f, indent=4)
 
-    print("\n Summary saved to: ru_summary.json")
+    print("\nSummary saved to: ru_summary.json")
 
 
 # ========= json to csv =====================
@@ -425,6 +425,55 @@ def display_labels():
 #         med  = vals.median()
 
 #         print(f"{m:<12} | {mn:8.2f} | {mx:8.2f} | {avg:8.2f} | {q1:8.2f} | {q3:8.2f} | {med:8.2f}")
+
+
+# ========= gNB CSV Processing =========================
+def process_gnb(base_dir="gnb_csv", output_file="gnb_summary.csv"):
+    # 1) find all csv files under base_dir, including subfolders
+    pattern = os.path.join(base_dir, "**", "*.csv")
+    all_files = glob.glob(pattern, recursive=True)
+
+    df_list = []
+    for file_path in all_files:
+        df = pd.read_csv(file_path)
+
+        # drop first 5 and last 5 rows
+        if len(df) <= 10:
+            continue
+        df = df.iloc[5:-5].copy()
+
+        # inject filename column
+        filename = os.path.basename(file_path)
+        df.insert(0, "filename", filename)
+
+        df_list.append(df)
+
+    if not df_list:
+        print("No data frames to combine (all files too short?).")
+        return
+
+    # concatenate
+    combined = pd.concat(df_list, ignore_index=True)
+    combined.to_csv(output_file, index=False)
+    print(f"Saved combined summary: {output_file}")
+
+    # --- Now validate brate columns ---
+    # DL plane should be "390M"
+    bad_dl = combined.loc[combined["brate"] != "390M", "filename"].unique().tolist()
+    # UL plane should be "100M"
+    bad_ul = combined.loc[combined["brate.1"] != "100M", "filename"].unique().tolist()
+
+    if not bad_dl and not bad_ul:
+        print("No change in brate values in either plane")
+    else:
+        if bad_dl:
+            print("Change in brate values in DL plane for file(s):")
+            for fn in bad_dl:
+                print("  -", fn)
+        if bad_ul:
+            print("Change in brate values in UL plane for file(s):")
+            for fn in bad_ul:
+                print("  -", fn)
 
 
 
