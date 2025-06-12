@@ -113,10 +113,10 @@ def parse_batch(base_folder="attack_results"):
 # ============ gets avg of before, during and after logs =============
 def get_avg_ru():
     columns_of_interest = [
-        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
-        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
-        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
-        "RX_CORRUPT", "RX_ERR_DROP", "TX_TOTAL"
+        "RX_TOTAL", "RX_LATE",
+        "RX_LATE_C",
+        "RX_LATE_C_U",
+        "TX_TOTAL"
     ]
 
     ru_csv_dir = "ru_csv"
@@ -196,65 +196,52 @@ def process_ru():
 
     # === Initial Metrics ===
     rx_metrics = [
-        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
-        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
-        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
-        "RX_CORRUPT", "RX_ERR_DROP"
+        "RX_TOTAL", "RX_LATE",
+        "RX_LATE_C",
+        "RX_LATE_C_U"
     ]
 
-    # === Check if RX_CORRUPT and RX_ERR_DROP are always 0 ===
-    zero_check_cols = [
-        "before_RX_CORRUPT", "during_RX_CORRUPT", "after_RX_CORRUPT",
-        "before_RX_ERR_DROP", "during_RX_ERR_DROP", "after_RX_ERR_DROP"
-    ]
+    # # === Check if RX_CORRUPT and RX_ERR_DROP are always 0 ===
+    # zero_check_cols = [
+    #     "before_RX_CORRUPT", "during_RX_CORRUPT", "after_RX_CORRUPT",
+    #     "before_RX_ERR_DROP", "during_RX_ERR_DROP", "after_RX_ERR_DROP"
+    # ]
 
-    # Keep only existing columns from the list
-    existing_zero_cols = [col for col in zero_check_cols if col in df.columns]
+    # # Keep only existing columns from the list
+    # existing_zero_cols = [col for col in zero_check_cols if col in df.columns]
 
-    if existing_zero_cols:
-        all_zero = (df[existing_zero_cols] == 0).all(axis=1)
-        non_zero_files = df.loc[~all_zero, 'file'].tolist()
+    # if existing_zero_cols:
+    #     all_zero = (df[existing_zero_cols] == 0).all(axis=1)
+    #     non_zero_files = df.loc[~all_zero, 'file'].tolist()
 
-        if not non_zero_files:
-            print("RX_CORRUPT and RX_ERR_DROP are always 0 — removing them from metrics.")
-            rx_metrics = [m for m in rx_metrics if m not in ["RX_CORRUPT", "RX_ERR_DROP"]]
-            df.drop(columns=existing_zero_cols, inplace=True)
-        else:
-            print("Non-zero RX_CORRUPT or RX_ERR_DROP found in the following files:")
-            for file in non_zero_files:
-                print(f" - {file}")
-    else:
-        print("ℹRX_CORRUPT and RX_ERR_DROP columns not found in data. Skipping zero check.")
+    #     if not non_zero_files:
+    #         print("RX_CORRUPT and RX_ERR_DROP are always 0 — removing them from metrics.")
+    #         rx_metrics = [m for m in rx_metrics if m not in ["RX_CORRUPT", "RX_ERR_DROP"]]
+    #         df.drop(columns=existing_zero_cols, inplace=True)
+    #     else:
+    #         print("Non-zero RX_CORRUPT or RX_ERR_DROP found in the following files:")
+    #         for file in non_zero_files:
+    #             print(f" - {file}")
+    # else:
+    #     print("ℹRX_CORRUPT and RX_ERR_DROP columns not found in data. Skipping zero check.")
 
 
-    # === Percent Calculation ===
-    phases = ['before', 'during', 'after']
-    for phase in phases:
-        for metric in rx_metrics:
-            value_col = f"{phase}_{metric}"
-            base_col = "before_RX_TOTAL"
-            pct_col = f"pct_{phase}_{metric}"
-            if value_col in df.columns and base_col in df.columns:
-                df[pct_col] = 100 * df[value_col] / df[base_col]
-
-        tx_col = f"{phase}_TX_TOTAL"
-        pct_tx_col = f"pct_{phase}_TX_TOTAL"
-        if tx_col in df.columns and "before_TX_TOTAL" in df.columns:
-            df[pct_tx_col] = 100 * df[tx_col] / df["before_TX_TOTAL"]
-
-    # === Delta Calculation ===
+    # === Percent Change Calculation ====
     delta_metrics = rx_metrics + ["RX_TOTAL", "TX_TOTAL"]
     for metric in delta_metrics:
-        pct_before = f"pct_before_{metric}"
-        pct_during = f"pct_during_{metric}"
-        pct_after = f"pct_after_{metric}"
-        delta_during = f"delta_during_{metric}"
-        delta_after = f"delta_after_{metric}"
+        val_before = f"before_{metric}"
+        val_during = f"during_{metric}"
+        val_after = f"after_{metric}"
+        change_during = f"change_pct_during_{metric}"
+        change_after = f"change_pct_after_{metric}"
 
-        if pct_before in df.columns and pct_during in df.columns:
-            df[delta_during] = df[pct_during] - df[pct_before]
-        if pct_before in df.columns and pct_after in df.columns:
-            df[delta_after] = df[pct_after] - df[pct_before]
+
+        if val_before in df.columns and val_during in df.columns:
+            df[change_during] = 100 * (df[val_during] - df[val_before]) / df[val_before]
+        if val_before in df.columns and val_after in df.columns:
+            df[change_after] = 100 * (df[val_after] - df[val_before]) / df[val_before]
+
+
 
     # === Save Output ===
     df.to_csv("ru_summary.csv", index=False)
@@ -262,43 +249,65 @@ def process_ru():
 
     return df
 
-
-
-
-
-
 # ========= print ru results in terminal ===============
 def display_ru():
     df = pd.read_csv("ru_summary.csv")
 
     ordered_metrics = [
-        "RX_TOTAL", "RX_ON_TIME", "RX_EARLY", "RX_LATE",
-        "RX_ON_TIME_C", "RX_EARLY_C", "RX_LATE_C",
-        "RX_ON_TIME_C_U", "RX_EARLY_C_U", "RX_LATE_C_U",
+        "RX_TOTAL", "RX_LATE",
+        "RX_LATE_C",
+        "RX_LATE_C_U",
         "TX_TOTAL"
     ]
 
     for _, row in df.iterrows():
-        print(f"\n{row['file']}:\n")
-        print(f"{'Metric':<25} | {'Before':>10} | {'%':>7} | {'During':>10} | {'%':>7} | {'After':>10} | {'%':>7} | {'ΔDuring':>9} | {'ΔAfter':>9}")
-        print("-" * 110)
+        print(f"\n{row['file']}\n")
+        print(f"{'Metric':<25} | {'Before':>12} | {'During':>12} | {'After':>12} | {'Δ%During':>10} | {'Δ%After':>9}")
+        print("-" * 90)
 
         for metric in ordered_metrics:
             b_val = row.get(f"before_{metric}", float('nan'))
             d_val = row.get(f"during_{metric}", float('nan'))
             a_val = row.get(f"after_{metric}", float('nan'))
 
-            b_pct = row.get(f"pct_before_{metric}", float('nan'))
-            d_pct = row.get(f"pct_during_{metric}", float('nan'))
-            a_pct = row.get(f"pct_after_{metric}", float('nan'))
+            change_d = row.get(f"change_pct_during_{metric}", float('nan'))
+            change_a = row.get(f"change_pct_after_{metric}", float('nan'))
 
-            delta_d = row.get(f"delta_during_{metric}", float('nan'))
-            delta_a = row.get(f"delta_after_{metric}", float('nan'))
+            print(f"{metric:<25} | {b_val:>12.2f} | {d_val:>12.2f} | {a_val:>12.2f} | {change_d:>9.2f}% | {change_a:>8.2f}%")
 
-            print(f"{metric:<25} | {b_val:>10.2f} | {b_pct:>6.2f}% | "
-                  f"{d_val:>10.2f} | {d_pct:>6.2f}% | {a_val:>10.2f} | {a_pct:>6.2f}% | "
-                  f"{delta_d:>8.2f}% | {delta_a:>8.2f}%")
+# ==== filters data by different metrics =================
 
+
+            
+
+# ======= stats for range of percent point change ===========
+# def stats_df():
+#     df = pd.read_csv("ru_summary.csv")
+
+#     delta_during_cols = [col for col in df.columns if col.startswith("delta_during_")]
+#     delta_after_cols = [col for col in df.columns if col.startswith("delta_after_")]
+
+#     def compute_stats(columns, phase_label):
+#         print(f"\n{'='*35} {phase_label.upper()} CHANGES {'='*35}")
+#         print(f"{'Metric':<30} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'3Q':>8} | {'Median':>8}")
+#         print("-" * 90)
+
+#         for col in columns:
+#             metric = col.replace(f"delta_{phase_label}_", "")
+#             series = df[col].dropna().abs()
+
+#             if not series.empty:
+#                 smallest = series.min()
+#                 largest = series.max()
+#                 avg = series.mean()
+#                 q1 = series.quantile(0.25)
+#                 q3 = series.quantile(0.75)
+#                 median = series.median()
+
+#                 print(f"{metric:<30} | {smallest:8.2f} | {largest:8.2f} | {avg:8.2f} | {q1:8.2f} | {q3:8.2f} | {median:8.2f}")
+
+#     compute_stats(delta_during_cols, "during")
+#     compute_stats(delta_after_cols, "after")
 
 
 
@@ -309,7 +318,9 @@ if __name__ == "__main__":
     print("ru_emulator logs saved in ru_csv")
     print("gNB logs saved in gnb_csv")
 
-    # get_avg_ru()
-    # to_csv()
+    get_avg_ru()
+    to_csv()
     process_ru()
     display_ru()
+    # stats_df()
+    filter_data()
