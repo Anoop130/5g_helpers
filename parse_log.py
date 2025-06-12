@@ -4,6 +4,7 @@ import os
 import glob
 import json
 import pandas as pd
+import numpy as np
 
 def clean_ansi_escape(line):
     """Remove ANSI escape sequences like \x1b[0m."""
@@ -115,7 +116,6 @@ def get_avg_ru():
     columns_of_interest = [
         "RX_TOTAL", "RX_LATE",
         "RX_LATE_C",
-        "RX_LATE_C_U",
         "TX_TOTAL"
     ]
 
@@ -171,6 +171,7 @@ def to_csv():
 # ========= processing ru files =============
 def process_ru():
     import pandas as pd
+    import numpy as np
 
     # Load CSV
     df = pd.read_csv("ru_summary.csv")
@@ -179,14 +180,9 @@ def process_ru():
     df['file'] = df['file'].str.replace(r'^ru_', '', regex=True)
     df['file'] = df['file'].str.replace(r'\.csv$', '', regex=True)
 
-    # Save intermediate cleaned version
-    df.to_csv("ru_summary.csv", index=False)
-    print("Cleaned CSV saved to ru_summary.csv")
-
     # Check for NaNs
     nan_summary = df.isna().sum(axis=1)
     files_with_nans = df.loc[nan_summary > 0, 'file'].tolist()
-
     if files_with_nans:
         with open("crash_summary.txt", "w") as f:
             for filename in files_with_nans:
@@ -194,40 +190,11 @@ def process_ru():
         print(f"\n{len(files_with_nans)} files had NaN values. Names written to crash_summary.txt")
         df = df[~df['file'].isin(files_with_nans)]
 
-    # === Initial Metrics ===
-    rx_metrics = [
-        "RX_TOTAL", "RX_LATE",
-        "RX_LATE_C",
-        "RX_LATE_C_U"
-    ]
+    # Metrics for delta calculation
+    rx_metrics = ["RX_TOTAL", "RX_LATE", "RX_LATE_C", "RX_LATE_C_U"]
 
-    # # === Check if RX_CORRUPT and RX_ERR_DROP are always 0 ===
-    # zero_check_cols = [
-    #     "before_RX_CORRUPT", "during_RX_CORRUPT", "after_RX_CORRUPT",
-    #     "before_RX_ERR_DROP", "during_RX_ERR_DROP", "after_RX_ERR_DROP"
-    # ]
-
-    # # Keep only existing columns from the list
-    # existing_zero_cols = [col for col in zero_check_cols if col in df.columns]
-
-    # if existing_zero_cols:
-    #     all_zero = (df[existing_zero_cols] == 0).all(axis=1)
-    #     non_zero_files = df.loc[~all_zero, 'file'].tolist()
-
-    #     if not non_zero_files:
-    #         print("RX_CORRUPT and RX_ERR_DROP are always 0 — removing them from metrics.")
-    #         rx_metrics = [m for m in rx_metrics if m not in ["RX_CORRUPT", "RX_ERR_DROP"]]
-    #         df.drop(columns=existing_zero_cols, inplace=True)
-    #     else:
-    #         print("Non-zero RX_CORRUPT or RX_ERR_DROP found in the following files:")
-    #         for file in non_zero_files:
-    #             print(f" - {file}")
-    # else:
-    #     print("ℹRX_CORRUPT and RX_ERR_DROP columns not found in data. Skipping zero check.")
-
-
-    # === Percent Change Calculation ====
-    delta_metrics = rx_metrics + ["RX_TOTAL", "TX_TOTAL"]
+    # === Percent Change Calculation ===
+    delta_metrics = rx_metrics + ["TX_TOTAL"]
     for metric in delta_metrics:
         val_before = f"before_{metric}"
         val_during = f"during_{metric}"
@@ -235,33 +202,169 @@ def process_ru():
         change_during = f"change_pct_during_{metric}"
         change_after = f"change_pct_after_{metric}"
 
-
         if val_before in df.columns and val_during in df.columns:
             df[change_during] = 100 * (df[val_during] - df[val_before]) / df[val_before]
         if val_before in df.columns and val_after in df.columns:
             df[change_after] = 100 * (df[val_after] - df[val_before]) / df[val_before]
 
+    # === Label attack outcomes ===
+    def classify(row):
+        # RX/TX thresholds
+        RXTX_NONE = 1.0     # ±1%: no impact
+        RXTX_PROB = 1.0     # >+1%/-1%: problem (overload or degradation)
+        RXTX_RECOV = 1.0    # ±1%: full recovery
+        RXTX_NORECOV = 5.0  # >±5%: no recovery
 
+        # Lates thresholds (using percent change)
+        # No impact: <25%
+        # Very minutely: 25–50%
+        # Minutely: 50–100%
+        # Increase: 100–1000%
+        # Significant: >1000%
+        def max_late(metric):
+            return max(
+                row.get(f"change_pct_{metric}_RX_LATE", 0),
+                row.get(f"change_pct_{metric}_RX_LATE_C", 0),
+                row.get(f"change_pct_{metric}_RX_LATE_C_U", 0)
+            )
+        lates_during = max_late("during")
+        lates_after  = max_late("after")
 
-    # === Save Output ===
+        rx_during = row.get("change_pct_during_RX_TOTAL", 0)
+        tx_during = row.get("change_pct_during_TX_TOTAL", 0)
+        rx_after  = row.get("change_pct_after_RX_TOTAL", 0)
+        tx_after  = row.get("change_pct_after_TX_TOTAL", 0)
+
+        # --- RX/TX Problem Path: ---
+        if (rx_during > RXTX_PROB or tx_during > RXTX_PROB):
+            # Overload: Recovery
+            if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
+                return "overload_full_recovery"
+            # Overload: No recovery
+            if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
+                return "overload_no_recovery"
+            # Else, generic overload (mid)
+            return "overload_partial_recovery"
+
+        if (rx_during < -RXTX_PROB or tx_during < -RXTX_PROB):
+            # Degradation: Recovery
+            if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
+                return "degradation_full_recovery"
+            # Degradation: No recovery
+            if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
+                return "degradation_no_recovery"
+            # Else, generic degradation (mid)
+            return "degradation_partial_recovery"
+
+        # --- RX/TX No Impact Path: (now evaluate Lates bands) ---
+        if abs(rx_during) <= RXTX_NONE and abs(tx_during) <= RXTX_NONE:
+            # LATE NO IMPACT
+            if lates_during < 25:
+                return "no_impact"
+            # LATE VERY MINUTELY
+            if 25 <= lates_during < 50:
+                if lates_after < 25:
+                    return "lates_very_minute_increase_full_recovery"
+                elif 25 <= lates_after < 50:
+                    return "lates_very_minute_increase_no_recovery"
+                elif lates_after >= 50:
+                    return "lates_very_minute_increase_worsen"
+            # LATE MINUTELY
+            if 50 <= lates_during < 100:
+                if lates_after < 25:
+                    return "lates_minute_increase_full_recovery"
+                elif 25 <= lates_after < 50:
+                    return "lates_minute_increase_slight_recovery"
+                elif 50 <= lates_after < 100:
+                    return "lates_minute_increase_no_recovery"
+                elif lates_after >= 100:
+                    return "lates_minute_increase_worsen"
+            # LATE INCREASE
+            if 100 <= lates_during < 1000:
+                if lates_after < 25:
+                    return "lates_increase_full_recovery"
+                elif 25 <= lates_after < 100:
+                    return "lates_increase_slight_recovery"
+                elif 100 <= lates_after < 1000:
+                    return "lates_increase_no_recovery"
+                elif lates_after >= 1000:
+                    return "lates_increase_worsen"
+            # LATE SIGNIFICANT
+            if lates_during >= 1000:
+                if lates_after < 25:
+                    return "lates_significant_increase_full_recovery"
+                elif 25 <= lates_after < 1000:
+                    return "lates_significant_increase_slight_recovery"
+                elif lates_after >= 1000:
+                    if lates_after > lates_during:
+                        return "lates_significant_increase_worsen"
+                    else:
+                        return "lates_significant_increase_no_recovery"
+
+        # fallback
+        return "other"
+
+    # Clean and classify
+    df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
+    df["attack_outcome"] = df.apply(classify, axis=1)
+
+    rank_map = {
+        "overload_full_recovery":           1,
+        "overload_partial_recovery":        2,
+        "overload_no_recovery":             3,
+        "degradation_full_recovery":        4,
+        "degradation_partial_recovery":     5,
+        "degradation_no_recovery":          6,
+        "no_impact":                        7,
+        "lates_very_minute_increase_full_recovery": 8,
+        "lates_very_minute_increase_no_recovery":   9,
+        "lates_very_minute_increase_worsen":       10,
+        "lates_minute_increase_full_recovery":     11,
+        "lates_minute_increase_slight_recovery":   12,
+        "lates_minute_increase_no_recovery":       13,
+        "lates_minute_increase_worsen":            14,
+        "lates_increase_full_recovery":            15,
+        "lates_increase_slight_recovery":          16,
+        "lates_increase_no_recovery":              17,
+        "lates_increase_worsen":                   18,
+        "lates_significant_increase_full_recovery":19,
+        "lates_significant_increase_slight_recovery": 20,
+        "lates_significant_increase_no_recovery":  21,
+        "lates_significant_increase_worsen":       22,
+        "other":                                   99
+    }
+    df["outcome_rank"] = df["attack_outcome"].map(rank_map).fillna(99).astype(int)
+
+    # Save final
     df.to_csv("ru_summary.csv", index=False)
-    print("Final summary with percentage and delta values saved to ru_summary.csv")
-
+    print("Final summary with outcome labels saved to ru_summary.csv")
     return df
 
+
+
 # ========= print ru results in terminal ===============
-def display_ru():
+def display_ru(filter_label=None):
+    import pandas as pd
+
     df = pd.read_csv("ru_summary.csv")
 
     ordered_metrics = [
         "RX_TOTAL", "RX_LATE",
         "RX_LATE_C",
-        "RX_LATE_C_U",
         "TX_TOTAL"
     ]
 
+    if filter_label:
+        df = df[df["attack_outcome"] == filter_label]
+        if df.empty:
+            print(f"No entries found for label: {filter_label}")
+            return
+
     for _, row in df.iterrows():
-        print(f"\n{row['file']}\n")
+        rank  = row["outcome_rank"]
+        label = row["attack_outcome"]
+
+        print(f"\n{row['file']} — Rank: {rank} | Label: {label}\n")
         print(f"{'Metric':<25} | {'Before':>12} | {'During':>12} | {'After':>12} | {'Δ%During':>10} | {'Δ%After':>9}")
         print("-" * 90)
 
@@ -275,39 +378,53 @@ def display_ru():
 
             print(f"{metric:<25} | {b_val:>12.2f} | {d_val:>12.2f} | {a_val:>12.2f} | {change_d:>9.2f}% | {change_a:>8.2f}%")
 
-# ==== filters data by different metrics =================
 
 
-            
+# ==== displaying labels and ranks ========================
+def display_labels():
 
-# ======= stats for range of percent point change ===========
-# def stats_df():
+    df = pd.read_csv("ru_summary.csv")
+
+    if not {"file", "attack_outcome", "outcome_rank"}.issubset(df.columns):
+        print("Required columns not found in ru_summary.csv.")
+        return
+
+    df_sorted = df.sort_values(by="outcome_rank")
+
+    print(f"\n{'File':<40} | {'Rank':<5} | {'Outcome Label'}")
+    print("-" * 65)
+    for _, row in df_sorted.iterrows():
+        print(f"{row['file']:<40} | {int(row['outcome_rank']):<5} | {row['attack_outcome']}")
+
+# ==== displaying stats for all metrics ====================
+# def stats_summary():
+#     import pandas as pd
+
 #     df = pd.read_csv("ru_summary.csv")
+#     metrics = ["RX_TOTAL", "RX_LATE", "RX_LATE_C", "TX_TOTAL"]
+#     phases  = ["before", "during", "after"]
 
-#     delta_during_cols = [col for col in df.columns if col.startswith("delta_during_")]
-#     delta_after_cols = [col for col in df.columns if col.startswith("delta_after_")]
+#     print(f"\n{'Metric':<12} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'3Q':>8} | {'Median':>8}")
+#     print("-" * 68)
 
-#     def compute_stats(columns, phase_label):
-#         print(f"\n{'='*35} {phase_label.upper()} CHANGES {'='*35}")
-#         print(f"{'Metric':<30} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'3Q':>8} | {'Median':>8}")
-#         print("-" * 90)
+#     for m in metrics:
+#         # gather all three phases into one Series
+#         cols = [f"{p}_{m}" for p in phases if f"{p}_{m}" in df.columns]
+#         if not cols:
+#             continue
+#         # stack them into a single flat Series
+#         vals = pd.concat([df[c].dropna().astype(float) for c in cols], ignore_index=True)
+#         if vals.empty:
+#             continue
 
-#         for col in columns:
-#             metric = col.replace(f"delta_{phase_label}_", "")
-#             series = df[col].dropna().abs()
+#         mn   = vals.min()
+#         mx   = vals.max()
+#         avg  = vals.mean()
+#         q1   = vals.quantile(0.25)
+#         q3   = vals.quantile(0.75)
+#         med  = vals.median()
 
-#             if not series.empty:
-#                 smallest = series.min()
-#                 largest = series.max()
-#                 avg = series.mean()
-#                 q1 = series.quantile(0.25)
-#                 q3 = series.quantile(0.75)
-#                 median = series.median()
-
-#                 print(f"{metric:<30} | {smallest:8.2f} | {largest:8.2f} | {avg:8.2f} | {q1:8.2f} | {q3:8.2f} | {median:8.2f}")
-
-#     compute_stats(delta_during_cols, "during")
-#     compute_stats(delta_after_cols, "after")
+#         print(f"{m:<12} | {mn:8.2f} | {mx:8.2f} | {avg:8.2f} | {q1:8.2f} | {q3:8.2f} | {med:8.2f}")
 
 
 
@@ -318,9 +435,11 @@ if __name__ == "__main__":
     print("ru_emulator logs saved in ru_csv")
     print("gNB logs saved in gnb_csv")
 
+    process_gnb()
+
     get_avg_ru()
     to_csv()
     process_ru()
-    display_ru()
-    # stats_df()
-    filter_data()
+    # display_ru("lates_significant_increase_no_recovery")
+    # display_labels()
+    # stats_summary()
