@@ -389,7 +389,7 @@ def display_labels():
         print("Required columns not found in ru_summary.csv.")
         return
 
-    df_sorted = df.sort_values(by="outcome_rank")
+    df_sorted = df.sort_values(by="file")
 
     print(f"\n{'File':<40} | {'Rank':<5} | {'Outcome Label'}")
     print("-" * 65)
@@ -489,6 +489,6 @@ if __name__ == "__main__":
     get_avg_ru()
     to_csv()
     process_ru()
-    # display_ru("lates_significant_increase_no_recovery")
-    # display_labels()
+    # display_ru()
+    display_labels()
     # stats_summary()
