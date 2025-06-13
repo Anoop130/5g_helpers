@@ -204,6 +204,17 @@ def compute_delta_stats(df):
                 }
     return stats
 
+# ========= Display Delta Thresholds =====================
+
+def display_delta_thresholds(stats):
+    """
+    Print the 1st quartile (q1) and median thresholds for each delta_pct_* column.
+    """
+    print("\nDelta Thresholds (1Q and Median):")
+    print(f"{'Metric':<35} | {'1Q':>10} | {'Median':>10}")
+    print("-" * 55)
+    for col, thr in sorted(stats.items()):
+        print(f"{col:<35} | {thr['q1']:8.4f}% | {thr['median']:8.4f}%")
 
 # ========= Classify RU Events =====================
 def classify(row, stats):
@@ -271,9 +282,6 @@ def classify(row, stats):
 
     return "other"
 
-
-
-
 # ========= processing ru files =============
 def process_ru():
     import pandas as pd
@@ -334,6 +342,7 @@ def process_ru():
 
     # 1) compute thresholds
     stats = compute_delta_stats(df)
+    display_delta_thresholds(stats)
 
     # 2) apply classification (no lambda):
     def classify_row(r):
@@ -347,7 +356,7 @@ def process_ru():
     # --- Part 3: Map attack_outcome to outcome_rank ---
     
     rank_map = {
-        "rx overloaded no recovery":        1,
+        "rx overloaded no recovery":       1,
         "rx overloaded with recovery":     2,
         "rx degradation no recovery":      3,
         "rx degradation with recovery":    4,
@@ -431,34 +440,6 @@ def display_labels():
     for _, row in df_sorted.iterrows():
         print(f"{row['file']:<40} | {int(row['outcome_rank']):<5} | {row['attack_outcome']}")
 
-# ==== displaying stats for all metrics ====================
-def stats_summary():
-    import pandas as pd
-
-    df = pd.read_csv("ru_summary.csv")
-
-    # find all delta‐percent columns
-    delta_cols = [c for c in df.columns if c.startswith("delta_pct_")]
-
-    # header
-    print(f"\n{'Metric':<35} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'Median':>8} | {'3Q':>8}")
-    print("-" * 90)
-
-    for col in sorted(delta_cols):
-        vals = df[col].dropna().astype(float)
-        if vals.empty:
-            continue
-        mn   = vals.min()
-        mx   = vals.max()
-        avg  = vals.mean()
-        q1   = vals.quantile(0.25)
-        med  = vals.median()
-        q3   = vals.quantile(0.75)
-
-        print(f"{col:<35} | {mn:8.2f} | {mx:8.2f} | {avg:8.2f} | {q1:8.2f} | {med:8.2f} | {q3:8.2f}")
-
-
-
 # ========= gNB CSV Processing =========================
 def process_gnb(base_dir="gnb_csv", output_file="gnb_summary.csv"):
     # 1) find all csv files under base_dir, including subfolders
@@ -507,8 +488,6 @@ def process_gnb(base_dir="gnb_csv", output_file="gnb_summary.csv"):
             for fn in bad_ul:
                 print("  -", fn)
 
-
-
 # === Run Batch ===
 if __name__ == "__main__":
 
@@ -521,6 +500,6 @@ if __name__ == "__main__":
     get_avg_ru()
     to_csv()
     process_ru()
-    display_ru("late with no recovery")
-    # display_labels()
-    # stats_summary()
+    
+    # display_ru("")
+    display_labels()
