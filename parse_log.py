@@ -115,7 +115,7 @@ def parse_batch(base_folder="attack_results"):
 def get_avg_ru():
     columns_of_interest = [
         "RX_TOTAL", "RX_LATE",
-        "RX_LATE_C",
+        "RX_LATE_C", "RX_LATE_C_U",
         "TX_TOTAL"
     ]
 
@@ -168,6 +168,112 @@ def to_csv():
     
     print("CSV saved to ru_summary.csv")
 
+import pandas as pd
+import numpy as np
+
+# ========= Compute Delta Stats =====================
+
+def compute_delta_stats(df):
+    """
+    Scan delta‐percent columns for RX_LATE, RX_LATE_C, RX_LATE_C_U, RX_TOTAL, TX_TOTAL
+    and compute 1Q and median for each phase (during, after).
+    For the three late‐metrics, ignore any non‐positive deltas (i.e. improvements) when
+    calculating their quartiles/medians.
+    Returns a dict: stats[col_name] = {"q1":…, "median":…}
+    """
+    late_metrics = {"RX_LATE", "RX_LATE_C", "RX_LATE_C_U"}
+    other_metrics = ["RX_TOTAL", "TX_TOTAL"]
+    phases = ["during", "after"]
+
+    stats = {}
+    for metric in late_metrics.union(other_metrics):
+        for phase in phases:
+            col = f"delta_pct_{phase}_{metric}"
+            if col not in df.columns:
+                continue
+
+            vals = df[col].dropna().astype(float)
+            # For late‐metrics, ignore any zero or negative deltas
+            if metric in late_metrics:
+                vals = vals[vals > 0]
+
+            if not vals.empty:
+                stats[col] = {
+                    "q1":     vals.quantile(0.25),
+                    "median": vals.median()
+                }
+    return stats
+
+
+# ========= Classify RU Events =====================
+def classify(row, stats):
+    """
+    row: a DataFrame row
+    stats: output of compute_delta_stats(df)
+    
+    Returns one of:
+      - "no impact"
+      - "rx overloaded with recovery" / "rx overloaded no recovery"
+      - "rx degradation with recovery" / "rx degradation no recovery"
+      - "late with recovery" / "late with no recovery"
+      - "other"
+    """
+    late_metrics = ["RX_LATE", "RX_LATE_C", "RX_LATE_C_U"]
+    overload_thresh = 5.0  # 5% threshold for RX/TX overload
+
+    # fetch the key delta values
+    rx_d = row["delta_pct_during_RX_TOTAL"]
+    rx_a = row["delta_pct_after_RX_TOTAL"]
+    tx_d = row["delta_pct_during_TX_TOTAL"]
+
+    # 1) NO IMPACT:
+    #    • both |rx_d| < 5% and |tx_d| < 5%
+    #    • AND every late‐metric during ≤ its 1Q
+    if (
+        abs(rx_d) < overload_thresh
+        and abs(tx_d) < overload_thresh
+        and all(
+            row[f"delta_pct_during_{m}"] <= stats[f"delta_pct_during_{m}"]["q1"]
+            for m in late_metrics
+            if f"delta_pct_during_{m}" in stats
+        )
+    ):
+        return "no impact"
+
+    # 2) RX OVERLOAD (rx_d > +5%)
+    if rx_d > overload_thresh:
+        if rx_a < overload_thresh:
+            return "rx overloaded with recovery"
+        else:
+            return "rx overloaded no recovery"
+
+    # 3) RX DEGRADATION (rx_d < −5%)
+    if rx_d < -overload_thresh:
+        if rx_a > -overload_thresh:
+            return "rx degradation with recovery"
+        else:
+            return "rx degradation no recovery"
+
+    # 4) LATE-ONLY CASES (no overload/degradation)
+    #    For each late metric:
+    #      - if during > 1Q → late event
+    #      - then classify by after < median (recovery) or ≥ median (no recovery)
+    for m in late_metrics:
+        dcol = f"delta_pct_during_{m}"
+        acol = f"delta_pct_after_{m}"
+        if dcol in stats and acol in stats:
+            if row[dcol] > stats[dcol]["q1"]:
+                # this metric saw a late-spike:
+                if row[acol] < stats[acol]["median"]:
+                    return "late with recovery"
+                else:
+                    return "late with no recovery"
+
+    return "other"
+
+
+
+
 # ========= processing ru files =============
 def process_ru():
     import pandas as pd
@@ -180,7 +286,7 @@ def process_ru():
     df['file'] = df['file'].str.replace(r'^ru_', '', regex=True)
     df['file'] = df['file'].str.replace(r'\.csv$', '', regex=True)
 
-    # Check for NaNs
+    # Drop rows with NaNs
     nan_summary = df.isna().sum(axis=1)
     files_with_nans = df.loc[nan_summary > 0, 'file'].tolist()
     if files_with_nans:
@@ -190,243 +296,79 @@ def process_ru():
         print(f"\n{len(files_with_nans)} files had NaN values. Names written to crash_summary.txt")
         df = df[~df['file'].isin(files_with_nans)]
 
-    # Metrics for delta calculation
-    rx_metrics = ["RX_TOTAL", "RX_LATE", "RX_LATE_C", "RX_LATE_C_U"]
+    # === Percent Calculation ===
+    rx_metrics = ["RX_LATE", "RX_LATE_C", "RX_LATE_C_U"]
+    rx_baseline = "before_RX_TOTAL"
+    for metric in rx_metrics:
+        for phase in ["before", "during", "after"]:
+            source_col = f"{phase}_{metric}"
+            pct_col = f"pct_{phase}_{metric}"
+            if source_col in df.columns and rx_baseline in df.columns:
+                df[pct_col] = 100 * df[source_col] / df[rx_baseline]
 
-    # === Percent Change Calculation ===
-    delta_metrics = rx_metrics + ["TX_TOTAL"]
+    # TX_TOTAL: percent based on before_TX_TOTAL
+    tx_baseline = "before_TX_TOTAL"
+    for phase in ["before", "during", "after"]:
+        col = f"{phase}_TX_TOTAL"
+        pct_col = f"pct_{phase}_TX_TOTAL"
+        if col in df.columns and tx_baseline in df.columns:
+            df[pct_col] = 100 * df[col] / df[tx_baseline]
+
+    # RX_TOTAL: percent based on itself
+    for phase in ["before", "during", "after"]:
+        col = f"{phase}_RX_TOTAL"
+        pct_col = f"pct_{phase}_RX_TOTAL"
+        if col in df.columns and rx_baseline in df.columns:
+            df[pct_col] = 100 * df[col] / df[rx_baseline]
+
+    # === Delta Percent Calculation ===
+    delta_metrics = rx_metrics + ["TX_TOTAL", "RX_TOTAL"]
     for metric in delta_metrics:
-        val_before = f"before_{metric}"
-        val_during = f"during_{metric}"
-        val_after = f"after_{metric}"
-        change_during = f"change_pct_during_{metric}"
-        change_after = f"change_pct_after_{metric}"
-
-        if val_before in df.columns and val_during in df.columns:
-            df[change_during] = 100 * (df[val_during] - df[val_before]) / df[val_before]
-        if val_before in df.columns and val_after in df.columns:
-            df[change_after] = 100 * (df[val_after] - df[val_before]) / df[val_before]
-
-    # === Label attack outcomes ===
-    def classify(row):
-        # RX/TX thresholds
-        RXTX_NONE = 1.0     # ±1%: no impact
-        RXTX_PROB = 1.0     # >+1%/-1%: problem (overload or degradation)
-        RXTX_RECOV = 1.0    # ±1%: full recovery
-        RXTX_NORECOV = 5.0  # >±5%: no recovery
-
-        # Lates thresholds (using percent change)
-        # No impact: <25%
-        # Very minutely: 25–50%
-        # Minutely: 50–100%
-        # Increase: 100–1000%
-        # Significant: >1000%
-        def max_late(metric):
-            return max(
-                row.get(f"change_pct_{metric}_RX_LATE", 0),
-                row.get(f"change_pct_{metric}_RX_LATE_C", 0),
-                row.get(f"change_pct_{metric}_RX_LATE_C_U", 0)
-            )
-        lates_during = max_late("during")
-        lates_after  = max_late("after")
-
-        rx_during = row.get("change_pct_during_RX_TOTAL", 0)
-        tx_during = row.get("change_pct_during_TX_TOTAL", 0)
-        rx_after  = row.get("change_pct_after_RX_TOTAL", 0)
-        tx_after  = row.get("change_pct_after_TX_TOTAL", 0)
-
-        # --- OVERLOAD  ---------------------
-        
-        if (rx_during > RXTX_PROB or tx_during > RXTX_PROB):
-            # Overload: Recovery
-            if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
-
-                #check lates
-                if lates_during >= 25:
-                    if lates_after < 25:
-                        return "overload_full_recovery_lates_recovered"
-                    elif lates_after < lates_during:
-                        return "overload_full_recovery_lates_improved"
-                    else:
-                        return "overload_full_recovery_lates_not_recovered"
-
-                return "overload_full_recovery"
+        for phase in ["during", "after"]:
+            pct_col = f"pct_{phase}_{metric}"
+            pct_before = f"pct_before_{metric}"
+            delta_col = f"delta_pct_{phase}_{metric}"
+            if pct_before in df.columns and pct_col in df.columns:
+                df[delta_col] = df[pct_col] - df[pct_before]
 
 
-            # Overload: No recovery
-            if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
+    # 1) compute thresholds
+    stats = compute_delta_stats(df)
 
-                # check lates
-                if lates_during >= 25 and lates_after < lates_during:
-                    return "overload_no_recovery_lates_improved"
-
-                return "overload_no_recovery"
-
-            # partial RX/TX recovery
-            # now also check lates
-            if lates_during >= 25:
-                if lates_after < 25:
-                    return "overload_partial_recovery_lates_recovered"
-                elif lates_after < lates_during:
-                    return "overload_partial_recovery_lates_improved"
-                else:
-                    return "overload_partial_recovery_lates_not_recovered"
-
-            return "overload_partial_recovery"  
+    # 2) apply classification (no lambda):
+    def classify_row(r):
+        return classify(r, stats)
 
 
-        # --- DEGRADATION  ----------------
+    df["attack_outcome"] = df.apply(classify_row, axis=1)
 
-        if (rx_during < -RXTX_PROB or tx_during < -RXTX_PROB):
-            # Degradation: Recovery
-            if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
-
-                #check lates
-                if lates_during >= 25:
-                    if lates_after < 25:
-                        return "degradation_full_recovery_lates_recovered"
-                    elif lates_after < lates_during:
-                        return "degradation_full_recovery_lates_improved"
-                    else:
-                        return "degradation_full_recovery_lates_not_recovered"
-
-                return "degradation_full_recovery"
-
-            # Degradation: No recovery
-            if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
-                if lates_during >= 25 and lates_after < lates_during:
-                    return "degradation_no_recovery_lates_improved"
-                return "degradation_no_recovery"
-
-            # Else, generic degradation (mid)
-            if lates_during >= 25:
-                if lates_after < 25:
-                    return "degradation_partial_recovery_lates_recovered"
-                elif lates_after < lates_during:
-                    return "degradation_partial_recovery_lates_improved"
-                else:
-                    return "degradation_partial_recovery_lates_not_recovered"
-
-            return "degradation_partial_recovery"
-
-
-
-
-        # --- RX/TX No Impact Path: (now evaluate Lates bands) ---
-        if abs(rx_during) <= RXTX_NONE and abs(tx_during) <= RXTX_NONE:
-            # LATE NO IMPACT
-            if lates_during < 25:
-                return "no_impact"
-            # LATE VERY MINUTELY
-            if 25 <= lates_during < 50:
-                if lates_after < 25:
-                    return "lates_very_minute_increase_full_recovery"
-                elif 25 <= lates_after < 50:
-                    return "lates_very_minute_increase_no_recovery"
-                elif lates_after >= 50:
-                    return "lates_very_minute_increase_worsen"
-            # LATE MINUTELY
-            if 50 <= lates_during < 100:
-                if lates_after < 25:
-                    return "lates_minute_increase_full_recovery"
-                elif 25 <= lates_after < 50:
-                    return "lates_minute_increase_slight_recovery"
-                elif 50 <= lates_after < 100:
-                    return "lates_minute_increase_no_recovery"
-                elif lates_after >= 100:
-                    return "lates_minute_increase_worsen"
-            # LATE INCREASE
-            if 100 <= lates_during < 1000:
-                if lates_after < 25:
-                    return "lates_increase_full_recovery"
-                elif 25 <= lates_after < 100:
-                    return "lates_increase_slight_recovery"
-                elif 100 <= lates_after < 1000:
-                    return "lates_increase_no_recovery"
-                elif lates_after >= 1000:
-                    return "lates_increase_worsen"
-            # LATE SIGNIFICANT
-            if lates_during >= 1000:
-                if lates_after < 25:
-                    return "lates_significant_increase_full_recovery"
-                elif 25 <= lates_after < 1000:
-                    return "lates_significant_increase_slight_recovery"
-                elif lates_after >= 1000:
-                    if lates_after > lates_during:
-                        return "lates_significant_increase_worsen"
-                    else:
-                        return "lates_significant_increase_no_recovery"
-
-        # fallback
-        return "other"
-
-    # Clean and classify
+    # === Classification Placeholder ===
     df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
-    df["attack_outcome"] = df.apply(classify, axis=1)
-
+    # --- Part 3: Map attack_outcome to outcome_rank ---
+    
     rank_map = {
-    # OVERLOAD (1–10)
-    "overload_full_recovery":                         1,
-    "overload_full_recovery_lates_recovered":         2,
-    "overload_full_recovery_lates_improved":          3,
-    "overload_full_recovery_lates_not_recovered":     4,
+        "rx overloaded no recovery":        1,
+        "rx overloaded with recovery":     2,
+        "rx degradation no recovery":      3,
+        "rx degradation with recovery":    4,
+        "late with no recovery":           5,
+        "late with recovery":              6,
+        "no impact":                       7,
+        "other":                          99
+    }
 
-    "overload_partial_recovery":                      5,
-    "overload_partial_recovery_lates_recovered":      6,
-    "overload_partial_recovery_lates_improved":       7,
-    "overload_partial_recovery_lates_not_recovered":  8,
+    df["outcome_rank"] = (
+        df["attack_outcome"]
+        .map(rank_map)            # map strings → ints
+        .fillna(99)               # anything missing → 99
+        .astype(int)              # ensure integer dtype
+    )
 
-    "overload_no_recovery":                           9,
-    "overload_no_recovery_lates_improved":           10,
-
-    # DEGRADATION (11–20)
-    "degradation_full_recovery":                     11,
-    "degradation_full_recovery_lates_recovered":     12,
-    "degradation_full_recovery_lates_improved":      13,
-    "degradation_full_recovery_lates_not_recovered": 14,
-
-    "degradation_partial_recovery":                  15,
-    "degradation_partial_recovery_lates_recovered":  16,
-    "degradation_partial_recovery_lates_improved":   17,
-    "degradation_partial_recovery_lates_not_recovered": 18,
-
-    "degradation_no_recovery":                       19,
-    "degradation_no_recovery_lates_improved":        20,
-
-    # NO IMPACT
-    "no_impact":                                     21,
-
-    # LATES‐ONLY (22–36)
-    "lates_very_minute_increase_full_recovery":      22,
-    "lates_very_minute_increase_no_recovery":        23,
-    "lates_very_minute_increase_worsen":             24,
-
-    "lates_minute_increase_full_recovery":           25,
-    "lates_minute_increase_slight_recovery":         26,
-    "lates_minute_increase_no_recovery":             27,
-    "lates_minute_increase_worsen":                  28,
-
-    "lates_increase_full_recovery":                  29,
-    "lates_increase_slight_recovery":                30,
-    "lates_increase_no_recovery":                    31,
-    "lates_increase_worsen":                         32,
-
-    "lates_significant_increase_full_recovery":      33,
-    "lates_significant_increase_slight_recovery":    34,
-    "lates_significant_increase_no_recovery":        35,
-    "lates_significant_increase_worsen":             36,
-
-    # fallback
-    "other":                                         99,
-}
-
-    df["outcome_rank"] = df["attack_outcome"].map(rank_map).fillna(99).astype(int)
 
     # Save final
     df.to_csv("ru_summary.csv", index=False)
-    print("Final summary with outcome labels saved to ru_summary.csv")
+    print("Final summary with percentage and delta columns saved to ru_summary.csv")
     return df
-
 
 
 # ========= print ru results in terminal ===============
@@ -436,13 +378,11 @@ def display_ru(filter_label=None):
     df = pd.read_csv("ru_summary.csv")
 
     ordered_metrics = [
-        "RX_TOTAL", "RX_LATE",
-        "RX_LATE_C",
-        "TX_TOTAL"
+        "RX_TOTAL", "RX_LATE", "RX_LATE_C", "RX_LATE_C_U", "TX_TOTAL"
     ]
 
     if filter_label:
-        df = df[df["attack_outcome"] == filter_label]
+        df = df[df["attack_outcome"].str.contains(filter_label, case=False, na=False)]
         if df.empty:
             print(f"No entries found for label: {filter_label}")
             return
@@ -452,18 +392,26 @@ def display_ru(filter_label=None):
         label = row["attack_outcome"]
 
         print(f"\n{row['file']} — Rank: {rank} | Label: {label}\n")
-        print(f"{'Metric':<25} | {'Before':>12} | {'During':>12} | {'After':>12} | {'Δ%During':>10} | {'Δ%After':>9}")
-        print("-" * 90)
+        print(f"{'Metric':<20} | {'Before':>10} | {'During':>10} | {'After':>10} | "
+              f"{'%Before':>10} | {'%During':>10} | {'%After':>10} | "
+              f"{'Δ%During':>10} | {'Δ%After':>10}")
+        print("-" * 110)
 
         for metric in ordered_metrics:
             b_val = row.get(f"before_{metric}", float('nan'))
             d_val = row.get(f"during_{metric}", float('nan'))
             a_val = row.get(f"after_{metric}", float('nan'))
 
-            change_d = row.get(f"change_pct_during_{metric}", float('nan'))
-            change_a = row.get(f"change_pct_after_{metric}", float('nan'))
+            pct_b = row.get(f"pct_before_{metric}", float('nan'))
+            pct_d = row.get(f"pct_during_{metric}", float('nan'))
+            pct_a = row.get(f"pct_after_{metric}", float('nan'))
 
-            print(f"{metric:<25} | {b_val:>12.2f} | {d_val:>12.2f} | {a_val:>12.2f} | {change_d:>9.2f}% | {change_a:>8.2f}%")
+            delta_d = row.get(f"delta_pct_during_{metric}", float('nan'))
+            delta_a = row.get(f"delta_pct_after_{metric}", float('nan'))
+
+            print(f"{metric:<20} | {b_val:>10.2f} | {d_val:>10.2f} | {a_val:>10.2f} | "
+                  f"{pct_b:>9.2f}% | {pct_d:>9.2f}% | {pct_a:>9.2f}% | "
+                  f"{delta_d:>9.2f}% | {delta_a:>9.2f}%")
 
 
 
@@ -484,34 +432,31 @@ def display_labels():
         print(f"{row['file']:<40} | {int(row['outcome_rank']):<5} | {row['attack_outcome']}")
 
 # ==== displaying stats for all metrics ====================
-# def stats_summary():
-#     import pandas as pd
+def stats_summary():
+    import pandas as pd
 
-#     df = pd.read_csv("ru_summary.csv")
-#     metrics = ["RX_TOTAL", "RX_LATE", "RX_LATE_C", "TX_TOTAL"]
-#     phases  = ["before", "during", "after"]
+    df = pd.read_csv("ru_summary.csv")
 
-#     print(f"\n{'Metric':<12} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'3Q':>8} | {'Median':>8}")
-#     print("-" * 68)
+    # find all delta‐percent columns
+    delta_cols = [c for c in df.columns if c.startswith("delta_pct_")]
 
-#     for m in metrics:
-#         # gather all three phases into one Series
-#         cols = [f"{p}_{m}" for p in phases if f"{p}_{m}" in df.columns]
-#         if not cols:
-#             continue
-#         # stack them into a single flat Series
-#         vals = pd.concat([df[c].dropna().astype(float) for c in cols], ignore_index=True)
-#         if vals.empty:
-#             continue
+    # header
+    print(f"\n{'Metric':<35} | {'Min':>8} | {'Max':>8} | {'Avg':>8} | {'1Q':>8} | {'Median':>8} | {'3Q':>8}")
+    print("-" * 90)
 
-#         mn   = vals.min()
-#         mx   = vals.max()
-#         avg  = vals.mean()
-#         q1   = vals.quantile(0.25)
-#         q3   = vals.quantile(0.75)
-#         med  = vals.median()
+    for col in sorted(delta_cols):
+        vals = df[col].dropna().astype(float)
+        if vals.empty:
+            continue
+        mn   = vals.min()
+        mx   = vals.max()
+        avg  = vals.mean()
+        q1   = vals.quantile(0.25)
+        med  = vals.median()
+        q3   = vals.quantile(0.75)
 
-#         print(f"{m:<12} | {mn:8.2f} | {mx:8.2f} | {avg:8.2f} | {q1:8.2f} | {q3:8.2f} | {med:8.2f}")
+        print(f"{col:<35} | {mn:8.2f} | {mx:8.2f} | {avg:8.2f} | {q1:8.2f} | {med:8.2f} | {q3:8.2f}")
+
 
 
 # ========= gNB CSV Processing =========================
@@ -576,6 +521,6 @@ if __name__ == "__main__":
     get_avg_ru()
     to_csv()
     process_ru()
-    # display_ru()
-    display_labels()
+    display_ru("late with no recovery")
+    # display_labels()
     # stats_summary()
