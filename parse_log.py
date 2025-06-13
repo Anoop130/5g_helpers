@@ -235,26 +235,82 @@ def process_ru():
         rx_after  = row.get("change_pct_after_RX_TOTAL", 0)
         tx_after  = row.get("change_pct_after_TX_TOTAL", 0)
 
-        # --- RX/TX Problem Path: ---
+        # --- OVERLOAD  ---------------------
+        
         if (rx_during > RXTX_PROB or tx_during > RXTX_PROB):
             # Overload: Recovery
             if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
+
+                #check lates
+                if lates_during >= 25:
+                    if lates_after < 25:
+                        return "overload_full_recovery_lates_recovered"
+                    elif lates_after < lates_during:
+                        return "overload_full_recovery_lates_improved"
+                    else:
+                        return "overload_full_recovery_lates_not_recovered"
+
                 return "overload_full_recovery"
+
+
             # Overload: No recovery
             if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
+
+                # check lates
+                if lates_during >= 25 and lates_after < lates_during:
+                    return "overload_no_recovery_lates_improved"
+
                 return "overload_no_recovery"
-            # Else, generic overload (mid)
-            return "overload_partial_recovery"
+
+            # partial RX/TX recovery
+            # now also check lates
+            if lates_during >= 25:
+                if lates_after < 25:
+                    return "overload_partial_recovery_lates_recovered"
+                elif lates_after < lates_during:
+                    return "overload_partial_recovery_lates_improved"
+                else:
+                    return "overload_partial_recovery_lates_not_recovered"
+
+            return "overload_partial_recovery"  
+
+
+        # --- DEGRADATION  ----------------
 
         if (rx_during < -RXTX_PROB or tx_during < -RXTX_PROB):
             # Degradation: Recovery
             if abs(rx_after) <= RXTX_RECOV and abs(tx_after) <= RXTX_RECOV:
+
+                #check lates
+                if lates_during >= 25:
+                    if lates_after < 25:
+                        return "degradation_full_recovery_lates_recovered"
+                    elif lates_after < lates_during:
+                        return "degradation_full_recovery_lates_improved"
+                    else:
+                        return "degradation_full_recovery_lates_not_recovered"
+
                 return "degradation_full_recovery"
+
             # Degradation: No recovery
             if abs(rx_after) > RXTX_NORECOV or abs(tx_after) > RXTX_NORECOV:
+                if lates_during >= 25 and lates_after < lates_during:
+                    return "degradation_no_recovery_lates_improved"
                 return "degradation_no_recovery"
+
             # Else, generic degradation (mid)
+            if lates_during >= 25:
+                if lates_after < 25:
+                    return "degradation_partial_recovery_lates_recovered"
+                elif lates_after < lates_during:
+                    return "degradation_partial_recovery_lates_improved"
+                else:
+                    return "degradation_partial_recovery_lates_not_recovered"
+
             return "degradation_partial_recovery"
+
+
+
 
         # --- RX/TX No Impact Path: (now evaluate Lates bands) ---
         if abs(rx_during) <= RXTX_NONE and abs(tx_during) <= RXTX_NONE:
@@ -309,30 +365,61 @@ def process_ru():
     df["attack_outcome"] = df.apply(classify, axis=1)
 
     rank_map = {
-        "overload_full_recovery":           1,
-        "overload_partial_recovery":        2,
-        "overload_no_recovery":             3,
-        "degradation_full_recovery":        4,
-        "degradation_partial_recovery":     5,
-        "degradation_no_recovery":          6,
-        "no_impact":                        7,
-        "lates_very_minute_increase_full_recovery": 8,
-        "lates_very_minute_increase_no_recovery":   9,
-        "lates_very_minute_increase_worsen":       10,
-        "lates_minute_increase_full_recovery":     11,
-        "lates_minute_increase_slight_recovery":   12,
-        "lates_minute_increase_no_recovery":       13,
-        "lates_minute_increase_worsen":            14,
-        "lates_increase_full_recovery":            15,
-        "lates_increase_slight_recovery":          16,
-        "lates_increase_no_recovery":              17,
-        "lates_increase_worsen":                   18,
-        "lates_significant_increase_full_recovery":19,
-        "lates_significant_increase_slight_recovery": 20,
-        "lates_significant_increase_no_recovery":  21,
-        "lates_significant_increase_worsen":       22,
-        "other":                                   99
-    }
+    # OVERLOAD (1–10)
+    "overload_full_recovery":                         1,
+    "overload_full_recovery_lates_recovered":         2,
+    "overload_full_recovery_lates_improved":          3,
+    "overload_full_recovery_lates_not_recovered":     4,
+
+    "overload_partial_recovery":                      5,
+    "overload_partial_recovery_lates_recovered":      6,
+    "overload_partial_recovery_lates_improved":       7,
+    "overload_partial_recovery_lates_not_recovered":  8,
+
+    "overload_no_recovery":                           9,
+    "overload_no_recovery_lates_improved":           10,
+
+    # DEGRADATION (11–20)
+    "degradation_full_recovery":                     11,
+    "degradation_full_recovery_lates_recovered":     12,
+    "degradation_full_recovery_lates_improved":      13,
+    "degradation_full_recovery_lates_not_recovered": 14,
+
+    "degradation_partial_recovery":                  15,
+    "degradation_partial_recovery_lates_recovered":  16,
+    "degradation_partial_recovery_lates_improved":   17,
+    "degradation_partial_recovery_lates_not_recovered": 18,
+
+    "degradation_no_recovery":                       19,
+    "degradation_no_recovery_lates_improved":        20,
+
+    # NO IMPACT
+    "no_impact":                                     21,
+
+    # LATES‐ONLY (22–36)
+    "lates_very_minute_increase_full_recovery":      22,
+    "lates_very_minute_increase_no_recovery":        23,
+    "lates_very_minute_increase_worsen":             24,
+
+    "lates_minute_increase_full_recovery":           25,
+    "lates_minute_increase_slight_recovery":         26,
+    "lates_minute_increase_no_recovery":             27,
+    "lates_minute_increase_worsen":                  28,
+
+    "lates_increase_full_recovery":                  29,
+    "lates_increase_slight_recovery":                30,
+    "lates_increase_no_recovery":                    31,
+    "lates_increase_worsen":                         32,
+
+    "lates_significant_increase_full_recovery":      33,
+    "lates_significant_increase_slight_recovery":    34,
+    "lates_significant_increase_no_recovery":        35,
+    "lates_significant_increase_worsen":             36,
+
+    # fallback
+    "other":                                         99,
+}
+
     df["outcome_rank"] = df["attack_outcome"].map(rank_map).fillna(99).astype(int)
 
     # Save final
