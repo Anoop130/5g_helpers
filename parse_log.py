@@ -284,8 +284,6 @@ def classify(row, stats):
 
 # ========= processing ru files =============
 def process_ru():
-    import pandas as pd
-    import numpy as np
 
     # Load CSV
     df = pd.read_csv("ru_summary.csv")
@@ -340,11 +338,11 @@ def process_ru():
                 df[delta_col] = df[pct_col] - df[pct_before]
 
 
-    # 1) compute thresholds
+    # compute thresholds
     stats = compute_delta_stats(df)
     display_delta_thresholds(stats)
 
-    # 2) apply classification (no lambda):
+    # apply classification:
     def classify_row(r):
         return classify(r, stats)
 
@@ -500,6 +498,6 @@ if __name__ == "__main__":
     get_avg_ru()
     to_csv()
     process_ru()
-    
-    # display_ru("")
+
+    display_ru("")
     display_labels()
