@@ -36,9 +36,8 @@ import simulation_environment
 # ======================================================================================
 class SimulationRewardModel(LlamaForSequenceClassification):
     def __init__(self, tokenizer, model_name):
-        # We initialize with a dummy config. The underlying LLM is never used.
         config = LlamaConfig.from_pretrained(model_name)
-        config.num_labels = 1 # Output is a single reward score
+        config.num_labels = 1  # Output is a single reward score
         super().__init__(config)
         self.tokenizer = tokenizer
 
@@ -55,8 +54,24 @@ class SimulationRewardModel(LlamaForSequenceClassification):
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         rewards = []
+
         for i in range(input_ids.shape[0]):
-            text = self.tokenizer.decode(input_ids[i], skip_special_tokens=True)
+            # === Safe decoding ===
+            if input_ids[i].nelement() == 0:
+                rewards.append(-1.0)
+                continue
+
+            try:
+                text = self.tokenizer.decode(input_ids[i], skip_special_tokens=True)
+            except Exception:
+                rewards.append(-1.0)
+                continue
+
+            if not text.strip():
+                rewards.append(-1.0)
+                continue
+
+            # === Extract JSON config and target frequency ===
             json_part_start = text.rfind("### JSON Output:")
             response_text = text[json_part_start:] if json_part_start != -1 else text
             config = self._parse_llm_output(response_text)
@@ -67,16 +82,27 @@ class SimulationRewardModel(LlamaForSequenceClassification):
                     if match:
                         target_freq_ghz = float(match.group(1))
                         simulation_environment.TARGET_FREQ = target_freq_ghz * 1e9
-                except (AttributeError, ValueError):
+                except Exception:
                     simulation_environment.TARGET_FREQ = 3.6e9
-                reward = mock_run_simulation_and_get_reward(config)
+
+                try:
+                    reward = mock_run_simulation_and_get_reward(config)
+                except Exception:
+                    reward = -1.0
             else:
                 reward = -1.0
-            
+
             rewards.append(reward)
 
         reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        return SequenceClassifierOutput(loss=None, logits=reward_tensor, hidden_states=None, attentions=None)
+        reward_tensor = torch.clamp(reward_tensor, min=-100.0, max=100.0)
+
+        return SequenceClassifierOutput(
+            loss=None,
+            logits=reward_tensor.unsqueeze(-1), # <--- ADD .unsqueeze(-1) HERE
+            hidden_states=None,
+            attentions=None,
+        )
 
 
 class LLMAgent:
@@ -88,7 +114,7 @@ class LLMAgent:
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
         print(f"--- Loading model: {model_name}. This may take a while... ---")
@@ -114,6 +140,8 @@ class LLMAgent:
             device_map="auto", trust_remote_code=True
         )
 
+        self.model.config.use_cache = False
+        self.model.gradient_checkpointing_enable()
         #
         # Step 3: The CRITIC model. Load as a PLAIN model, then attach the stolen value head.
         # This creates our perfect hybrid critic that has both `.base_model_prefix` and `.score`.
@@ -122,7 +150,9 @@ class LLMAgent:
             model_name, quantization_config=bnb_config, torch_dtype=torch.float16,
             device_map="auto", trust_remote_code=True
         )
+        self.value_model.config.use_cache = False
         self.value_model.score = value_head_to_steal # Attach the stolen head
+        self.value_model.gradient_checkpointing_enable()
 
         #
         # Step 4: The FROZEN REFERENCE model. This was already correct. It's a PLAIN model.
@@ -132,6 +162,8 @@ class LLMAgent:
             device_map="auto", trust_remote_code=True
         )
         #
+
+
         # ============================= END: THE FINAL, UNIFIED SOLUTION =============================
 
 
@@ -161,11 +193,16 @@ def run_training_loop(args):
     print("--- Building PPOConfig ---")
 
     ppo_cfg = PPOConfig(
-        learning_rate=args.learning_rate,
+        learning_rate=1.41e-6,
+        warmup_steps=10,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=1,
         num_ppo_epochs=4,
         kl_coef=0.05,
+        temperature=0.95,
+        cliprange_value=0.2,
+        max_grad_norm=0.5,
+        vf_coef=0.1,
         stop_token_id=None,
         output_dir="./results_ppo",
         bf16=False,
