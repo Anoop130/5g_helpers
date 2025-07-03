@@ -169,9 +169,10 @@ def run_training_loop(args):
         stop_token_id=None,
         output_dir="./results_ppo",
         bf16=False,
-        fp16=True,
+        fp16=False,
         response_length=150,
         total_episodes=args.num_episodes,
+        num_sample_generations=0
     )
 
     base_prompt = (
