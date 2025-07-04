@@ -1,8 +1,8 @@
 # requirements.txt
 torch
+bitsandbytes
+git+https://github.com/huggingface/trl.git
 transformers
-trl
 accelerate
-bitsandbytes>=0.43.1
 scipy
 tqdm
