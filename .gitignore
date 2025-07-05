@@ -13,7 +13,8 @@ results_ppo/
 *.ckpt
 
 # Ignore trained models
-jammer_agent_TinyLlama-1.1B-Chat-v1.0_ppo_trained/
+llm/jammer_agent_TinyLlama-1.1B-Chat-v1.0_ppo_trained/
+llm/trainer_output/
 
 # Ignore system or editor files
 .DS_Store

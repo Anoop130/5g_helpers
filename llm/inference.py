@@ -1,27 +1,44 @@
-# inference.py
+# inference.py (Robust Final Version)
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import argparse
 import re
 import json
+import os
+
+# Import your simulation environment to test the output
+from simulation_environment import mock_run_simulation_and_get_reward
+import simulation_environment
 
 def parse_llm_output(text_output: str) -> dict:
     """A simple function to extract the JSON from the model's raw output."""
     try:
+        # Use a robust regex to find a JSON block
         json_match = re.search(r'\{[^{}]*\}', text_output, re.DOTALL)
         if json_match:
+            # Basic validation that braces are balanced
             json_str = json_match.group(0)
-            return json.loads(json_str)
-        print("\n[Warning] No JSON object found in the output.")
+            if json_str.count("{") == json_str.count("}"):
+                return json.loads(json_str)
+        print("\n[Warning] No valid JSON object found in the output.")
         return None
     except json.JSONDecodeError:
-        print(f"\n[Warning] Could not decode the JSON string: {json_str}")
+        print(f"\n[Warning] Could not decode the extracted JSON string.")
         return None
 
-
 def main(args):
-    # --- 1. Load the a an and tokenizer ---
-    print(f"--- Loading fine-tuned model from: {args.model_path} ---")
+    # --- 1. Sanitize the model path for local loading ---
+    # Get the absolute path to resolve any ambiguity.
+    model_path = os.path.abspath(args.model_path)
+    
+    # Check if the directory actually exists before trying to load
+    if not os.path.isdir(model_path):
+        print(f"FATAL ERROR: The specified model path does not exist or is not a directory.")
+        print(f"Checked path: {model_path}")
+        return
+
+    print(f"--- Loading fine-tuned model from local path: {model_path} ---")
     
     # Use the same quantization config as in training for consistency
     bnb_config = BitsAndBytesConfig(
@@ -31,24 +48,34 @@ def main(args):
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    # Load your specialized model
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        quantization_config=bnb_config,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True
-    )
-    model.eval() # Set the model to evaluation mode
+    # --- 2. Load the model and tokenizer with local_files_only=True ---
+    # This forces the library to treat the path as local and skip Hub validation.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            quantization_config=bnb_config,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+            local_files_only=True  # <--- THIS IS THE KEY FIX
+        )
 
-    # Load the tokenizer that was saved with the model
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            local_files_only=True  # <--- ALSO USE FOR THE TOKENIZER
+        )
+    except Exception as e:
+        print("\n--- FATAL ERROR DURING MODEL LOADING ---")
+        print(f"An error occurred: {e}")
+        print("Please ensure the model path is correct and contains all necessary files (config.json, model.safetensors, etc.).")
+        return
+
+    model.eval() # Set the model to evaluation mode
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'left'
 
-    # --- 2. Create a prompt ---
-    # This is the same prompt structure you used in training
+    # --- 3. Create a prompt ---
     base_prompt_template = (
         "You are a world-class network security expert specializing in radio "
         "frequency analysis. Your task is to generate a precise JSON "
@@ -65,48 +92,54 @@ def main(args):
     prompt = base_prompt_template.format(target_freq_ghz=args.target_freq)
     print(f"\n--- Sending Prompt to Model ---\n{prompt}")
 
-    # --- 3. Generate the configuration ---
-    # Tokenize the prompt
+    # --- 4. Generate the configuration ---
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-    # Generate the output from the model
-    # We use different settings here for more deterministic output (less randomness)
     output_tokens = model.generate(
         **inputs,
         max_new_tokens=150,
-        temperature=0.1,  # Lower temperature for less random, more confident output
+        temperature=0.1,  # Lower temperature for more confident output
         top_p=0.9,
         do_sample=True,
-        pad_token_id=tokenizer.eos_token_id # Use eos_token_id for padding in generation
+        pad_token_id=tokenizer.eos_token_id
     )
     
-    # Decode the generated tokens into text, skipping the prompt part
-    # Note: output_tokens[0] contains the full sequence (prompt + response)
     response_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
-    
-    # Isolate just the newly generated part
     generated_part = response_text[len(prompt):]
     
     print("\n--- Model's Raw Output ---")
     print(generated_part)
 
-    # --- 4. Parse and display the clean JSON config ---
+    # --- 5. Parse, TEST, and display the result ---
     json_config = parse_llm_output(generated_part)
 
     if json_config:
         print("\n--- Parsed JSON Configuration ---")
-        # Pretty print the JSON
         print(json.dumps(json_config, indent=2))
+
+        # Test the configuration and get the reward score
+        try:
+            # Set the global target frequency for the simulation
+            simulation_environment.TARGET_FREQ = args.target_freq * 1e9
+            reward_score = mock_run_simulation_and_get_reward(json_config)
+            
+            print("\n--- Test Result ---")
+            print(f"Simulation Reward Score: {reward_score:.4f}")
+            
+        except Exception as e:
+            print(f"\n--- Error during simulation testing ---")
+            print(f"Could not calculate reward: {e}")
     else:
-        print("\n--- Failed to get a valid configuration ---")
+        print("\n--- Failed to get a valid configuration from model output ---")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate a jammer config using the fine-tuned LLM agent.")
+    parser = argparse.ArgumentParser(description="Generate and test a jammer config using a fine-tuned agent.")
     parser.add_argument(
         "--model_path",
         type=str,
-        default="./jammer_agent_TinyLlama-1.1B-Chat-v1.0_ppo_trained",
-        help="Path to the directory containing the saved PPO-trained model."
+        # This default path assumes you run a final training that saves to this folder.
+        # Example: a final_trainer.py or the original llm_rl_agent.py
+        default="./final_jammer_agent",
+        help="Local path to the directory containing the saved fine-tuned model."
     )
     parser.add_argument(
         "--target_freq",
