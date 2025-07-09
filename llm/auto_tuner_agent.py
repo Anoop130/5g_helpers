@@ -1,7 +1,7 @@
 # auto_tuner_agent.py (Now with full command-line control for testing)
 
 import torch
-import json
+import yaml  # CHANGED: Import yaml instead of json
 import re
 import random
 import argparse
@@ -61,11 +61,21 @@ class SimulationRewardModel(LlamaForSequenceClassification):
     # ... (This class is correct and remains unchanged) ...
     def __init__(self, tokenizer, model_name):
         config = LlamaConfig.from_pretrained(model_name); config.num_labels=1; super().__init__(config); self.tokenizer=tokenizer
-    def _parse_llm_output(self, t):
+        
+    # CHANGED: Updated the parser to handle YAML
+    def _parse_llm_output(self, text: str) -> dict:
         try:
-            match = re.search(r'\{[^{}]*\}', t, re.DOTALL)
-            return json.loads(match.group(0)) if match else None
-        except: return None
+            # Find the YAML block which starts after the specified marker
+            yaml_marker = "### YAML Output:"
+            if yaml_marker in text:
+                # Get the content after the marker and strip leading/trailing whitespace
+                yaml_string = text.split(yaml_marker, 1)[-1].strip()
+                # Use the safe loader to parse the YAML string
+                return yaml.safe_load(yaml_string)
+            return None
+        except yaml.YAMLError: # Catch potential parsing errors
+            return None
+            
     def forward(self, input_ids=None, **kwargs):
         rewards=[]
         for i in range(input_ids.shape[0]):
@@ -105,7 +115,8 @@ def execute_training_run(hparams: dict, base_model_name: str, inner_episodes: in
         num_sample_generations=0, bf16=True, **{'gamma': 0.99, 'lam': 0.95, 'cliprange': 0.2, 'cliprange_value': 0.2, 'vf_coef': 0.1}
     )
     base_prompt = "You are a world-class network security expert..."
-    raw_prompts = [{"query": f"{base_prompt} ...jam a target at {round(random.uniform(3.5, 3.7), 4):.4f} GHz.\n\n### JSON Output:\n"} for _ in range(inner_episodes)]
+    # CHANGED: Updated prompt to ask for YAML
+    raw_prompts = [{"query": f"{base_prompt} ...jam a target at {round(random.uniform(3.5, 3.7), 4):.4f} GHz.\n\n### YAML Output:\n"} for _ in range(inner_episodes)]
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
     train_dataset = Dataset.from_list(raw_prompts).map(lambda x: tokenizer(x["query"])).remove_columns(["query"])
@@ -117,7 +128,8 @@ def execute_training_run(hparams: dict, base_model_name: str, inner_episodes: in
     total_score = 0
     test_frequencies = [3.55, 3.60, 3.65] # Reduced test set for speed
     for freq in test_frequencies:
-        prompt_text = f"{base_prompt} ...jam a target at {freq:.4f} GHz.\n\n### JSON Output:\n"
+        # CHANGED: Updated prompt to ask for YAML
+        prompt_text = f"{base_prompt} ...jam a target at {freq:.4f} GHz.\n\n### YAML Output:\n"
         inputs = agent.tokenizer(prompt_text, return_tensors="pt").to(agent.device)
         output_tokens = agent.model.generate(**inputs, max_new_tokens=150, temperature=0.1, pad_token_id=agent.tokenizer.eos_token_id)
         full_text = agent.tokenizer.decode(output_tokens[0], skip_special_tokens=True)
@@ -138,7 +150,7 @@ def main():
     parser = argparse.ArgumentParser(description="Auto-Tuner for LLM Fine-Tuning.")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Base model to tune.")
     parser.add_argument("--outer_loops", type=int, default=5, help="Number of hyperparameter sets to test (meta-episodes).")
-    parser.add_argument("--inner_loops", type=int, default=10, help="Number of PPO training episodes for each hyperparameter set.")
+    parser.add_argument("--inner_loops", type=int, default=2, help="Number of PPO training episodes for each hyperparameter set.")
     args = parser.parse_args()
 
     # Reduced search space for quicker local testing
