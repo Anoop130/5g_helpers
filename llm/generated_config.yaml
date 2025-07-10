@@ -1,0 +1,7 @@
+amplitude: 1.74
+amplitude_width: 0.01
+center_frequency: 1.7400e9
+bandwidth: 100e6
+initial_phase: 0
+sampling_freq: 20e6
+num_samples: 2

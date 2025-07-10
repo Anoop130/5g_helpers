@@ -51,7 +51,6 @@ class HyperparameterAgent:
         keys, values = self.action_space.keys(), self.action_space.values()
         return [dict(zip(keys, instance)) for instance in product(*values)]
 
-# --- REVERTED: Using the simpler parser that was proven to work ---
 def _parse_llm_output(text: str) -> dict:
     """
     Parses the full text from the LLM to find and decode the YAML block.

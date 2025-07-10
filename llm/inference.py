@@ -1,150 +1,124 @@
-# inference.py (Robust Final Version)
+# inference.py
+# A simple script to generate a config using the best-known hyperparameters.
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-import argparse
+import yaml
 import re
-import json
-import os
-
-# Import your simulation environment to test the output
+import argparse
+from transformers import (
+    AutoTokenizer, GenerationConfig, BitsAndBytesConfig,
+    AutoModelForCausalLM
+)
 from simulation_environment import mock_run_simulation_and_get_reward
-import simulation_environment
 
-def parse_llm_output(text_output: str) -> dict:
-    """A simple function to extract the JSON from the model's raw output."""
+def _parse_llm_output(text: str) -> dict:
+    """
+    Parses the full text from the LLM to find and decode the YAML block.
+    """
     try:
-        # Use a robust regex to find a JSON block
-        json_match = re.search(r'\{[^{}]*\}', text_output, re.DOTALL)
-        if json_match:
-            # Basic validation that braces are balanced
-            json_str = json_match.group(0)
-            if json_str.count("{") == json_str.count("}"):
-                return json.loads(json_str)
-        print("\n[Warning] No valid JSON object found in the output.")
-        return None
-    except json.JSONDecodeError:
-        print(f"\n[Warning] Could not decode the extracted JSON string.")
-        return None
+        if "### YAML Output:" in text:
+            potential_yaml_section = text.split("### YAML Output:")[-1].strip()
+            documents = list(yaml.safe_load_all(potential_yaml_section))
+            if documents and isinstance(documents[0], dict):
+                return documents[0]
+    except (yaml.YAMLError, IndexError):
+        pass
+    return None
 
-def main(args):
-    # --- 1. Sanitize the model path for local loading ---
-    # Get the absolute path to resolve any ambiguity.
-    model_path = os.path.abspath(args.model_path)
+def main():
+    parser = argparse.ArgumentParser(description="Generate a jammer configuration using a fine-tuned LLM.")
+    parser.add_argument("--freq", type=float, required=True, help="The target frequency to jam in GHz (e.g., 1.842).")
+    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="The base model to use.")
+    parser.add_argument("--outfile", type=str, default="generated_config.yaml", help="The name of the file to save the generated config.")
+    args = parser.parse_args()
+
+    # --- THE BEST HYPERPARAMETERS DISCOVERED BY THE AUTO-TUNER ---
+    best_hps = {
+        'repetition_penalty': 1.1,
+        'temperature': 0.7,
+        'top_p': 0.9
+    }
+    print(f"Using recommended hyperparameters: {best_hps}")
+
+    # --- Load the Model and Tokenizer (same as before) ---
+    print(f"Loading model: {args.model}...")
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(args.model, quantization_config=bnb_config, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    print("Model loaded successfully.")
+
+    # --- Define the Prompt ---
+    PROMPT_TEMPLATE = """You are a highly skilled RF engineer specializing in electronic countermeasures.
+Your mission is to generate a complete YAML configuration file to effectively jam a target frequency.
+
+### Instructions:
+1.  Analyze the `High-Level Goal`.
+2.  Determine the optimal values for **all** required configuration parameters.
+3.  The output MUST be a single, valid YAML block containing all necessary keys.
+4.  Use snake_case for all keys (e.g., `center_frequency`).
+5.  Use scientific 'e' notation for frequencies and bandwidth.
+
+### Example:
+High-Level Goal: Jam a target at 0.915 GHz
+### Example YAML Output:
+amplitude: 0.9
+amplitude_width: 0.1
+center_frequency: 9.15e8
+bandwidth: 10e6
+initial_phase: 0
+sampling_freq: 20e6
+num_samples: 20000
+output_iq_file: "output.fc32"
+output_csv_file: "output.csv"
+write_iq: false
+write_csv: true
+device_args: "type=b200"
+tx_gain: 55
+
+---
+
+### Current Task:
+High-Level Goal: Jam a target at {freq:.4f} GHz
+
+### YAML Output:
+"""
+
+    # --- Generate the Configuration ---
+    print(f"\nGenerating configuration for {args.freq} GHz...")
+    prompt_text = PROMPT_TEMPLATE.format(freq=args.freq)
+    inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
     
-    # Check if the directory actually exists before trying to load
-    if not os.path.isdir(model_path):
-        print(f"FATAL ERROR: The specified model path does not exist or is not a directory.")
-        print(f"Checked path: {model_path}")
-        return
-
-    print(f"--- Loading fine-tuned model from local path: {model_path} ---")
+    generation_config = GenerationConfig(max_new_tokens=250, pad_token_id=tokenizer.eos_token_id, do_sample=True, **best_hps)
     
-    # Use the same quantization config as in training for consistency
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
+    output_tokens = model.generate(**inputs, generation_config=generation_config)
+    full_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
 
-    # --- 2. Load the model and tokenizer with local_files_only=True ---
-    # This forces the library to treat the path as local and skip Hub validation.
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            quantization_config=bnb_config,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-            local_files_only=True  # <--- THIS IS THE KEY FIX
-        )
+    # --- Parse, Validate, and Save the Output ---
+    config = _parse_llm_output(full_text)
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            local_files_only=True  # <--- ALSO USE FOR THE TOKENIZER
-        )
-    except Exception as e:
-        print("\n--- FATAL ERROR DURING MODEL LOADING ---")
-        print(f"An error occurred: {e}")
-        print("Please ensure the model path is correct and contains all necessary files (config.json, model.safetensors, etc.).")
-        return
+    if config:
+        print("\n" + "="*20 + " GENERATED CONFIGURATION " + "="*20)
+        # Convert dict to clean YAML string for printing
+        clean_yaml = yaml.dump(config, sort_keys=False)
+        print(clean_yaml)
+        
+        # Save the generated config to a file
+        with open(args.outfile, 'w') as f:
+            f.write(clean_yaml)
+        print(f"Configuration successfully saved to '{args.outfile}'")
 
-    model.eval() # Set the model to evaluation mode
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = 'left'
+        # Run the simulation to score the generated config
+        print("\n--- Running simulation on generated config... ---")
+        score = mock_run_simulation_and_get_reward(config)
+        print(f"\n--- VALIDATION COMPLETE ---")
+        print(f"Achieved Score: {score:.4f}")
 
-    # --- 3. Create a prompt ---
-    base_prompt_template = (
-        "You are a world-class network security expert specializing in radio "
-        "frequency analysis. Your task is to generate a precise JSON "
-        "configuration for a radio jammer to neutralize a target signal. "
-        "The JSON object must contain three keys: 'center_frequency' (float, in Hz), "
-        "'bandwidth' (float, in Hz), and 'tx_gain' (float, from 0-90). "
-        "Adhere strictly to the JSON format. Do not provide any other text, "
-        "explanation, or markdown. Your entire output must be only the JSON object."
-        "\n\n### Current Mission\n"
-        "Your current mission is to generate a config to jam a target at "
-        "{target_freq_ghz:.4f} GHz.\n\n### JSON Output:\n"
-    )
-    
-    prompt = base_prompt_template.format(target_freq_ghz=args.target_freq)
-    print(f"\n--- Sending Prompt to Model ---\n{prompt}")
-
-    # --- 4. Generate the configuration ---
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    output_tokens = model.generate(
-        **inputs,
-        max_new_tokens=150,
-        temperature=0.1,  # Lower temperature for more confident output
-        top_p=0.9,
-        do_sample=True,
-        pad_token_id=tokenizer.eos_token_id
-    )
-    
-    response_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
-    generated_part = response_text[len(prompt):]
-    
-    print("\n--- Model's Raw Output ---")
-    print(generated_part)
-
-    # --- 5. Parse, TEST, and display the result ---
-    json_config = parse_llm_output(generated_part)
-
-    if json_config:
-        print("\n--- Parsed JSON Configuration ---")
-        print(json.dumps(json_config, indent=2))
-
-        # Test the configuration and get the reward score
-        try:
-            # Set the global target frequency for the simulation
-            simulation_environment.TARGET_FREQ = args.target_freq * 1e9
-            reward_score = mock_run_simulation_and_get_reward(json_config)
-            
-            print("\n--- Test Result ---")
-            print(f"Simulation Reward Score: {reward_score:.4f}")
-            
-        except Exception as e:
-            print(f"\n--- Error during simulation testing ---")
-            print(f"Could not calculate reward: {e}")
     else:
-        print("\n--- Failed to get a valid configuration from model output ---")
+        print("\n---! GENERATION FAILED !---")
+        print("The model failed to produce a valid YAML configuration.")
+        print("Raw output was:")
+        print(full_text.split("### YAML Output:")[-1].strip())
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate and test a jammer config using a fine-tuned agent.")
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        # This default path assumes you run a final training that saves to this folder.
-        # Example: a final_trainer.py or the original llm_rl_agent.py
-        default="./final_jammer_agent",
-        help="Local path to the directory containing the saved fine-tuned model."
-    )
-    parser.add_argument(
-        "--target_freq",
-        type=float,
-        default=3.65,
-        help="The target frequency to jam, in GHz (e.g., 3.65)."
-    )
-    main(parser.parse_args())
+    main()
