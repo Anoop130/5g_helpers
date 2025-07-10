@@ -1,27 +1,22 @@
-# auto_tuner_agent.py (Now with full command-line control for testing)
+# auto_tuner_agent.py (Simplified Architecture + Your Final Prompt)
 
 import torch
-import yaml  # CHANGED: Import yaml instead of json
+import yaml
 import re
 import random
 import argparse
 from tqdm import tqdm
 from itertools import product
-import torch.nn as nn
-from datasets import Dataset
 
-# All imports needed for your specific TRL version's workflow
+# Imports for the simplified, no-fine-tuning approach
 from transformers import (
     AutoTokenizer, GenerationConfig, BitsAndBytesConfig,
-    AutoModelForCausalLM, LlamaConfig, LlamaForSequenceClassification
+    AutoModelForCausalLM
 )
-from transformers.modeling_outputs import SequenceClassifierOutput
-from trl import PPOTrainer as TRL_PPOTrainer, PPOConfig
 from simulation_environment import mock_run_simulation_and_get_reward
-import simulation_environment
 
 # ===================================================================
-# SECTION 1: AUTO-TUNER AGENT and HELPER CLASSES/FUNCTIONS
+# SECTION 1: AUTO-TUNER AGENT (Unchanged)
 # ===================================================================
 class HyperparameterAgent:
     def __init__(self, action_space: dict):
@@ -29,12 +24,11 @@ class HyperparameterAgent:
         self.q_table = {}
         self.learning_rate = 0.1
         self.epsilon = 0.9
-        self.epsilon_decay = 0.95 # Slightly faster decay for shorter runs
+        self.epsilon_decay = 0.95
         self.min_epsilon = 0.1
 
     def get_action(self) -> dict:
         actions = self._get_all_actions()
-        # Epsilon-Greedy Strategy
         if random.random() < self.epsilon:
             print("[Auto-Tuner] ACTION: Exploring with random hyperparameters.")
             return random.choice(actions)
@@ -57,121 +51,168 @@ class HyperparameterAgent:
         keys, values = self.action_space.keys(), self.action_space.values()
         return [dict(zip(keys, instance)) for instance in product(*values)]
 
-class SimulationRewardModel(LlamaForSequenceClassification):
-    # ... (This class is correct and remains unchanged) ...
-    def __init__(self, tokenizer, model_name):
-        config = LlamaConfig.from_pretrained(model_name); config.num_labels=1; super().__init__(config); self.tokenizer=tokenizer
-        
-    # CHANGED: Updated the parser to handle YAML
-    def _parse_llm_output(self, text: str) -> dict:
-        try:
-            # Find the YAML block which starts after the specified marker
-            yaml_marker = "### YAML Output:"
-            if yaml_marker in text:
-                # Get the content after the marker and strip leading/trailing whitespace
-                yaml_string = text.split(yaml_marker, 1)[-1].strip()
-                # Use the safe loader to parse the YAML string
-                return yaml.safe_load(yaml_string)
-            return None
-        except yaml.YAMLError: # Catch potential parsing errors
-            return None
-            
-    def forward(self, input_ids=None, **kwargs):
-        rewards=[]
-        for i in range(input_ids.shape[0]):
-            text = self.tokenizer.decode(input_ids[i], skip_special_tokens=True)
-            config = self._parse_llm_output(text)
-            reward = mock_run_simulation_and_get_reward(config) if config else -1.0
-            rewards.append(reward)
-        return SequenceClassifierOutput(loss=None, logits=torch.tensor(rewards, device=self.device).unsqueeze(-1))
-
-class LLMAgent:
-    # This class incorporates the dtype mismatch fix
-    def __init__(self, model_name, ppo_cfg, train_dataset):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
-        model_dtype = torch.bfloat16
-
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config, torch_dtype=model_dtype, device_map="auto")
-        self.ref_model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config, torch_dtype=model_dtype, device_map="auto")
-        self.value_model = AutoModelForCausalLM.from_pretrained(model_name, quantization_config=bnb_config, torch_dtype=model_dtype, device_map="auto")
-        
-        self.value_model.score = nn.Linear(self.value_model.config.hidden_size, 1, bias=False).to(device=self.device, dtype=model_dtype)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if self.tokenizer.pad_token is None: self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.reward_model = SimulationRewardModel(self.tokenizer, model_name).to(device=self.device, dtype=model_dtype)
-        self.model.generation_config = GenerationConfig(pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id, max_new_tokens=ppo_cfg.response_length, temperature=ppo_cfg.temperature, do_sample=True)
-        self.ppo_trainer = TRL_PPOTrainer(args=ppo_cfg, model=self.model, ref_model=self.ref_model, reward_model=self.reward_model, value_model=self.value_model, processing_class=self.tokenizer, train_dataset=train_dataset)
+def _parse_llm_output(text: str) -> dict:
+    try:
+        yaml_marker = "### YAML Output:"
+        if yaml_marker in text:
+            yaml_string = text.split(yaml_marker, 1)[-1].strip()
+            return yaml.safe_load(yaml_string)
+        return None
+    except yaml.YAMLError:
+        return None
 
 # ===================================================================
-# SECTION 2: THE MODEL TRAINER (The "Inner Loop" Function)
+# SECTION 2: THE GENERATION RUNNER (No more training!)
 # ===================================================================
-def execute_training_run(hparams: dict, base_model_name: str, inner_episodes: int) -> float:
-    print(f"\n--- [Worker] Starting run with HPs: {hparams} ---")
-    ppo_cfg = PPOConfig(
-        learning_rate=hparams['learning_rate'], num_ppo_epochs=hparams['num_ppo_epochs'], kl_coef=hparams['kl_coef'],
-        total_episodes=inner_episodes, exp_name="autotuner_worker", seed=random.randint(0, 10000),
-        per_device_train_batch_size=2, kl_estimator="k3", temperature=0.95, response_length=150,
-        num_sample_generations=0, bf16=True, **{'gamma': 0.99, 'lam': 0.95, 'cliprange': 0.2, 'cliprange_value': 0.2, 'vf_coef': 0.1}
-    )
-    base_prompt = "You are a world-class network security expert..."
-    # CHANGED: Updated prompt to ask for YAML
-    raw_prompts = [{"query": f"{base_prompt} ...jam a target at {round(random.uniform(3.5, 3.7), 4):.4f} GHz.\n\n### YAML Output:\n"} for _ in range(inner_episodes)]
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
-    train_dataset = Dataset.from_list(raw_prompts).map(lambda x: tokenizer(x["query"])).remove_columns(["query"])
-    train_dataset.set_format("torch")
-    agent = LLMAgent(model_name=base_model_name, ppo_cfg=ppo_cfg, train_dataset=train_dataset)
-    print(f"\n--- [Worker] Starting RL Training for {inner_episodes} episodes... ---")
-    agent.ppo_trainer.train()
-    print("\n--- [Worker] Evaluating final model performance... ---")
+def execute_generation_run(hparams: dict, model, tokenizer) -> float:
+    print(f"\n--- [Worker] Starting run with Generation HPs: {hparams} ---")
+    
+    # Using the exact prompt you provided, structured as a template
+    PROMPT_TEMPLATE = """You are a highly skilled RF engineer specializing in electronic countermeasures.
+Your mission is to generate a complete YAML configuration file to effectively jam a target frequency.
+
+### Instructions:
+1.  Analyze the `Current Mission` input, which contains the target frequency and a set of fixed hardware parameters.
+2.  Determine the optimal values for the following **variable parameters**:
+    - `amplitude`
+    - `amplitude_width`
+    - `bandwidth`
+    - `tx_gain`
+3.  Accurately copy the **fixed parameters** provided in the `Current Mission` into your output. Do not change their values.
+4.  Ensure the final output is a single, valid YAML block and nothing else.
+5.  Pay close attention to data types: `center_frequency`, `bandwidth`, and `sampling_freq` must use scientific 'e' notation (e.g., `1.842e9`).
+
+### Example Task:
+Target Frequency: 0.915 GHz
+Fixed Parameters:
+  initial_phase: 0
+  sampling_freq: 20e6
+  num_samples: 10000
+  output_iq_file: "output.fc32"
+  output_csv_file: "output.csv"
+  write_iq: false
+  write_csv: true
+  device_args: "type=b200"
+
+### Example YAML Output for 0.915 GHz:
+amplitude: 0.9
+amplitude_width: 0.1
+center_frequency: 9.15e8
+bandwidth: 10e6
+initial_phase: 0
+sampling_freq: 20e6
+num_samples: 10000
+output_iq_file: "output.fc32"
+output_csv_file: "output.csv"
+write_iq: false
+write_csv: true
+device_args: "type=b200"
+tx_gain: 55
+
+---
+
+### Current Mission:
+Target Frequency: {freq:.4f} GHz
+Fixed Parameters:
+{fixed_params_str}
+
+### YAML Output:
+"""
+    # Using the fixed parameters from your prompt's example
+    fixed_parameters = {
+      "initial_phase": 0,
+      "sampling_freq": 40e6,
+      "num_samples": 20000,
+      "output_iq_file": "output.fc32",
+      "output_csv_file": "output.csv",
+      "write_iq": False,
+      "write_csv": True,
+      "device_args": "type=b200"
+    }
+    fixed_params_str = "\n".join([f"  {k}: {v}" for k, v in fixed_parameters.items()])
+
     total_score = 0
-    test_frequencies = [3.55, 3.60, 3.65] # Reduced test set for speed
+    # The actual target frequencies we want the model to solve for
+    test_frequencies = [1.83, 1.842, 1.85] 
+    
+    generation_config = GenerationConfig(
+        max_new_tokens=250,
+        pad_token_id=tokenizer.eos_token_id,
+        do_sample=True, # Must be true to use temperature/top_p
+        **hparams # Directly apply the chosen generation hyperparameters
+    )
+
     for freq in test_frequencies:
-        # CHANGED: Updated prompt to ask for YAML
-        prompt_text = f"{base_prompt} ...jam a target at {freq:.4f} GHz.\n\n### YAML Output:\n"
-        inputs = agent.tokenizer(prompt_text, return_tensors="pt").to(agent.device)
-        output_tokens = agent.model.generate(**inputs, max_new_tokens=150, temperature=0.1, pad_token_id=agent.tokenizer.eos_token_id)
-        full_text = agent.tokenizer.decode(output_tokens[0], skip_special_tokens=True)
-        config = agent.reward_model._parse_llm_output(full_text)
-        score = mock_run_simulation_and_get_reward(config) if config else -1.0
+        prompt_text = PROMPT_TEMPLATE.format(freq=freq, fixed_params_str=fixed_params_str)
+        inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
+        
+        output_tokens = model.generate(**inputs, generation_config=generation_config)
+
+
+        # full_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
+        # print("="*40)
+        # print(f"DEBUGGING: Raw output from LLM for frequency {freq} GHz:")
+        # print(full_text)
+        # print("="*40)
+
+        # Get the length of the input prompt in tokens
+        input_token_length = inputs.input_ids.shape[1]
+        # Get only the new tokens generated by the model
+        generated_token_ids = output_tokens[0, input_token_length:]
+        # Decode only the new tokens
+        generated_text_only = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+
+        print("="*40)
+        print(f"DEBUGGING: Generated-only output for frequency {freq} GHz:")
+        print(generated_text_only)
+        print("="*40)
+
+        full_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
+        
+
+        config = _parse_llm_output(full_text)
+        score = mock_run_simulation_and_get_reward(config)
         total_score += score
+
     avg_score = total_score / len(test_frequencies)
     print(f"--- [Worker] Run Complete. Final average score: {avg_score:.4f} ---")
-    del agent
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
     return avg_score
 
 # ===================================================================
 # SECTION 3: THE MAIN CONTROLLER
 # ===================================================================
 def main():
-    # --- NEW: Command-line arguments to control the loops ---
-    parser = argparse.ArgumentParser(description="Auto-Tuner for LLM Fine-Tuning.")
-    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Base model to tune.")
-    parser.add_argument("--outer_loops", type=int, default=5, help="Number of hyperparameter sets to test (meta-episodes).")
-    parser.add_argument("--inner_loops", type=int, default=2, help="Number of PPO training episodes for each hyperparameter set.")
+    parser = argparse.ArgumentParser(description="Auto-Tuner for LLM Generation.")
+    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Base model to use.")
+    parser.add_argument("--loops", type=int, default=20, help="Number of hyperparameter sets to test.")
     args = parser.parse_args()
 
-    # Reduced search space for quicker local testing
+    # Hyperparameter space for text generation
     hyperparameter_space = {
-        'learning_rate': [1e-5, 5e-5],
-        'num_ppo_epochs': [2, 4],
-        'kl_coef': [0.05, 0.1]
+        'temperature': [0.6, 0.8, 1.0],
+        'top_p': [0.9, 0.95, 1.0],
+        'repetition_penalty': [1.0, 1.2],
     }
     
     auto_tuner = HyperparameterAgent(hyperparameter_space)
     
-    print("="*20 + " STARTING AUTO-TUNER AGENT " + "="*20)
-    print(f"Running for {args.outer_loops} outer loops, with {args.inner_loops} inner loops each.")
+    print("="*20 + " LOADING BASE MODEL (ONCE) " + "="*20)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(args.model, quantization_config=bnb_config, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+    print("="*20 + " MODEL LOADED " + "="*20)
 
-    for i in range(args.outer_loops):
-        print(f"\n{'='*15} Auto-Tuner Episode {i+1}/{args.outer_loops} {'='*15}")
+    print(f"Running for {args.loops} loops.")
+
+    for i in range(args.loops):
+        print(f"\n{'='*15} Auto-Tuner Episode {i+1}/{args.loops} {'='*15}")
         chosen_hps = auto_tuner.get_action()
-        reward = execute_training_run(
+        reward = execute_generation_run(
             hparams=chosen_hps, 
-            base_model_name=args.model, 
-            inner_episodes=args.inner_loops
+            model=model,
+            tokenizer=tokenizer
         )
         auto_tuner.learn(action=chosen_hps, reward=reward)
     
@@ -185,7 +226,8 @@ def main():
     for (hps_tuple, score) in sorted_q_table:
         print(f"  Score: {score:.4f} | Hyperparameters: {dict(hps_tuple)}")
     
-    print(f"\nRECOMMENDED HYPERPARAMETERS: {dict(sorted_q_table[0][0])}")
+    best_hps = dict(sorted_q_table[0][0])
+    print(f"\nRECOMMENDED GENERATION HYPERPARAMETERS: {best_hps}")
 
 if __name__ == "__main__":
     main()
