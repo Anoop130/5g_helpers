@@ -1,0 +1,21 @@
+FROM ubuntu:22.04
+
+# Install dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3 python3-pip \
+    tcpreplay \
+    expect \
+    wget \
+    iproute2 \
+    build-essential \
+    && apt-get clean
+
+WORKDIR /app
+
+COPY . .
+
+# Make scripts executable
+RUN chmod +x generate_pcap.sh auto_attacker.sh start_gnb.expect
+
+CMD ["bash", "-c", "bash generate_pcap.sh && bash auto_attacker.sh"]
