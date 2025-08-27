@@ -134,7 +134,7 @@ for ATTACK_FILE in "${ATTACK_LIST[@]}"; do
     echo "[DEBUG] Stopping gNB..."
     sudo kill $gnb_pid 2>/dev/null
 
-    echo "✅ Completed $ATTACK_FILE | Injection $INJ"
+    echo "Completed $ATTACK_FILE | Injection $INJ"
     echo "----------------------------------------"
 
 
